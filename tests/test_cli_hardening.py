@@ -208,6 +208,10 @@ class TestMainKeychainFlow:
             def __init__(self, sw, hostname):
                 self.sw = sw
                 self.hostname = hostname
+                self._compat_mode = False
+
+            def run_vlan_health_check(self):
+                return True
 
             def cmdloop(self):
                 return None

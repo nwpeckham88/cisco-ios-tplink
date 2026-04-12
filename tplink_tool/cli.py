@@ -40,6 +40,8 @@ def cyan(s):   return _c('36', s)
 def bold(s):   return _c('1',  s)
 def dim(s):    return _c('2',  s)
 
+_PORT_PRIORITY_LABELS = {1: 'Lowest', 2: 'Normal', 3: 'Medium', 4: 'Highest'}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -382,7 +384,7 @@ class SwitchCLI(cmd.Cmd):
 
     def _update_prompt(self):
         n = self._name
-        warn_tag = yellow(' [!COMPAT]') if getattr(self, '_compat_mode', False) else ''
+        warn_tag = yellow(' [!COMPAT]') if self._compat_mode else ''
         if self._mode == 'exec':
             self.prompt = bold(f'{n}') + warn_tag + bold('# ')
         elif self._mode == 'config':
@@ -480,7 +482,6 @@ class SwitchCLI(cmd.Cmd):
             print(f'  % {exc}')
 
     def default(self, line):
-        line = _normalize_command_head(line)
         cmd_word, args, _ = self.parseline(line)
         if not cmd_word:
             return
@@ -595,8 +596,10 @@ class SwitchCLI(cmd.Cmd):
             return
         try:
             vid = int(args.strip())
-            assert 1 <= vid <= 4094
-        except (ValueError, AssertionError):
+        except ValueError:
+            print('  Usage: vlan <1-4094>')
+            return
+        if not (1 <= vid <= 4094):
             print('  Usage: vlan <1-4094>')
             return
         self._enter('config-vlan', _vlan_id=vid)
@@ -741,19 +744,20 @@ class SwitchCLI(cmd.Cmd):
         return [s for s in ('access', 'trunk', 'pvid', 'mode') if s.startswith(text)]
 
     def _ensure_dot1q(self):
-        """Enable 802.1Q mode if not already on."""
-        enabled, _ = self.sw.get_dot1q_vlans()
+        """Enable 802.1Q mode if not already on. Returns current VLAN list."""
+        enabled, vlans = self.sw.get_dot1q_vlans()
         if not enabled:
             print('  Enabling 802.1Q VLAN mode...')
             self.sw.set_dot1q_enabled(True)
+            _, vlans = self.sw.get_dot1q_vlans()
+        return vlans
 
     def _sw_pvid(self, parts):
         if not parts or not parts[0].isdigit():
             print('  Usage: switchport pvid <vlan-id>')
             return
         vid = int(parts[0])
-        for p in self._if_ports:
-            self.sw.set_pvid([p], vid)
+        self.sw.set_pvid(self._if_ports, vid)
         self.run_vlan_health_check()
 
     def _sw_access(self, parts):
@@ -762,10 +766,8 @@ class SwitchCLI(cmd.Cmd):
             print('  Usage: switchport access vlan <id>')
             return
         vid = int(parts[1])
-        self._ensure_dot1q()
-        _, vlans = self.sw.get_dot1q_vlans()
+        vlans = self._ensure_dot1q()
         vmap = {v.vid: v for v in vlans}
-        # Add each port as untagged on the target VLAN, remove from others
         for port in self._if_ports:
             for v in vlans:
                 if v.vid == vid:
@@ -785,7 +787,7 @@ class SwitchCLI(cmd.Cmd):
                 tagged.remove(port)
             self.sw.add_dot1q_vlan(vid, name=(v.name if v else ''),
                                    tagged_ports=tagged, untagged_ports=untagged)
-            self.sw.set_pvid([port], vid)
+        self.sw.set_pvid(self._if_ports, vid)
         self.run_vlan_health_check()
 
     def _sw_trunk(self, parts):
@@ -794,7 +796,6 @@ class SwitchCLI(cmd.Cmd):
         if len(parts) < 2:
             print(usage)
             return
-        # strip 'allowed vlan' keywords
         while parts and parts[0].lower() in ('allowed', 'vlan'):
             parts = parts[1:]
         if len(parts) < 2:
@@ -809,8 +810,7 @@ class SwitchCLI(cmd.Cmd):
         if not vids:
             print(usage)
             return
-        self._ensure_dot1q()
-        _, vlans = self.sw.get_dot1q_vlans()
+        vlans = self._ensure_dot1q()
         vmap = {v.vid: v for v in vlans}
         for vid in vids:
             v = vmap.get(vid)
@@ -1071,13 +1071,14 @@ class SwitchCLI(cmd.Cmd):
                 return
             try:
                 pri = int(parts[1])
-                assert 1 <= pri <= 4
-            except (ValueError, AssertionError):
+            except ValueError:
+                print('  % Priority must be 1-4 (1=Lowest, 4=Highest)')
+                return
+            if not (1 <= pri <= 4):
                 print('  % Priority must be 1-4 (1=Lowest, 4=Highest)')
                 return
             self.sw.set_port_priority(self._if_ports, pri)
-            PRI = {1: 'Lowest', 2: 'Normal', 3: 'Medium', 4: 'Highest'}
-            print(f'  Port(s) {_port_range_str(self._if_ports)} priority → {PRI[pri]}')
+            print(f'  Port(s) {_port_range_str(self._if_ports)} priority → {_PORT_PRIORITY_LABELS[pri]}')
         else:
             print(f'  % Unknown qos sub-command: {sub}')
 
@@ -1103,28 +1104,32 @@ class SwitchCLI(cmd.Cmd):
         direction, val = parts[0], parts[1]
         try:
             kbps = int(val)
-            assert kbps >= 0
-        except (ValueError, AssertionError):
+        except ValueError:
             print('  % kbps must be a non-negative integer')
             return
-
-        # Read current settings for the other direction
-        bw_all = {b.port: b for b in self.sw.get_bandwidth_control()}
-        for port in self._if_ports:
-            cur = bw_all.get(port)
-            ingress = cur.ingress_rate if cur else 0
-            egress  = cur.egress_rate  if cur else 0
-            if direction.startswith('in'):
-                ingress = kbps
-            elif direction.startswith('eg'):
-                egress = kbps
-            else:
-                print(f'  % direction must be ingress or egress')
-                return
-            self.sw.set_bandwidth_control([port], ingress_kbps=ingress, egress_kbps=egress)
+        if kbps < 0:
+            print('  % kbps must be a non-negative integer')
+            return
+        if not self._apply_bandwidth_direction(direction, kbps):
+            return
         dir_str = 'ingress' if direction.startswith('in') else 'egress'
         kbps_str = f'{kbps:,} kbps' if kbps else 'unlimited'
         print(f'  {dir_str.capitalize()} rate on {_port_range_str(self._if_ports)}: {kbps_str}')
+
+    def _apply_bandwidth_direction(self, direction: str, kbps: int) -> bool:
+        """Set one bandwidth direction for all selected ports, preserving the other."""
+        if direction.startswith('in'):
+            pick = lambda cur: (kbps, cur.egress_rate if cur else 0)
+        elif direction.startswith('eg'):
+            pick = lambda cur: (cur.ingress_rate if cur else 0, kbps)
+        else:
+            print('  % direction must be ingress or egress')
+            return False
+        bw_all = {b.port: b for b in self.sw.get_bandwidth_control()}
+        for port in self._if_ports:
+            ingress, egress = pick(bw_all.get(port))
+            self.sw.set_bandwidth_control([port], ingress_kbps=ingress, egress_kbps=egress)
+        return True
 
     def _no_bandwidth(self, args):
         """no bandwidth {ingress|egress}  — remove rate limit"""
@@ -1132,25 +1137,13 @@ class SwitchCLI(cmd.Cmd):
             return
         parts = args.lower().split()
         if not parts:
-            # Remove both limits
             for port in self._if_ports:
                 self.sw.set_bandwidth_control([port], ingress_kbps=0, egress_kbps=0)
             print(f'  Bandwidth limits removed on {_port_range_str(self._if_ports)}')
             return
         direction = parts[0]
-        bw_all = {b.port: b for b in self.sw.get_bandwidth_control()}
-        for port in self._if_ports:
-            cur = bw_all.get(port)
-            ingress = cur.ingress_rate if cur else 0
-            egress  = cur.egress_rate  if cur else 0
-            if direction.startswith('in'):
-                ingress = 0
-            elif direction.startswith('eg'):
-                egress = 0
-            else:
-                print('  Usage: no bandwidth {ingress|egress}')
-                return
-            self.sw.set_bandwidth_control([port], ingress_kbps=ingress, egress_kbps=egress)
+        if not self._apply_bandwidth_direction(direction, 0):
+            return
         dir_str = 'ingress' if direction.startswith('in') else 'egress'
         print(f'  {dir_str.capitalize()} limit removed on {_port_range_str(self._if_ports)}')
 
@@ -1193,7 +1186,7 @@ class SwitchCLI(cmd.Cmd):
         if len(matches) > 1 and type_str not in type_map:
             print(f'  % Ambiguous: {", ".join(matches)}')
             return
-        chosen = type_map.get(type_str) or type_map.get(matches[0])
+        chosen = type_map[type_str] if type_str in type_map else type_map[matches[0]]
 
         try:
             rate = int(rate_val)
@@ -1239,7 +1232,6 @@ class SwitchCLI(cmd.Cmd):
         if not self._require('config'):
             return
         parts = args.lower().split()
-        # strip 'session 1'
         if len(parts) >= 2 and parts[0] == 'session':
             parts = parts[2:]  # discard 'session N'
 
@@ -1250,8 +1242,6 @@ class SwitchCLI(cmd.Cmd):
         sub = parts[0]
 
         if sub.startswith('dest'):
-            # destination interface gi<N>
-            # strip 'interface'
             iface_parts = [p for p in parts[1:] if p not in ('interface',)]
             ports = _parse_ports(' '.join(iface_parts))
             if len(ports) != 1:
@@ -1268,14 +1258,12 @@ class SwitchCLI(cmd.Cmd):
             print(f'  Mirror destination: gi{dest}')
 
         elif sub.startswith('src') or sub.startswith('sou'):
-            # source interface gi<N> {rx|tx|both}
-            # last token may be direction
             direction = 'both'
             iface_parts = parts[1:]
             if iface_parts and iface_parts[-1] in ('rx', 'tx', 'both'):
                 direction = iface_parts[-1]
                 iface_parts = iface_parts[:-1]
-            iface_parts = [p for p in iface_parts if p not in ('interface',)]
+            iface_parts = [p for p in iface_parts if p != 'interface']
             ports = _parse_ports(' '.join(iface_parts))
             if not ports:
                 print('  Usage: monitor session 1 source interface gi<N> {rx|tx|both}')
@@ -1322,7 +1310,6 @@ class SwitchCLI(cmd.Cmd):
         parts = args.lower().split()
         uplink = None
         if parts:
-            # strip 'uplink' keyword, parse port
             iface_parts = [p for p in parts if p not in ('uplink', 'interface')]
             if iface_parts:
                 ports = _parse_ports(iface_parts[0])
@@ -1446,25 +1433,26 @@ class SwitchCLI(cmd.Cmd):
     # test cable-diagnostics  (exec mode)
     # ------------------------------------------------------------------
 
-    def do_test(self, args):
-        """test cable-diagnostics interface gi<N>[,<M>]  — run TDR cable test"""
-        if not self._require('exec'):
-            return
-        parts = args.lower().split()
-        # strip keywords: cable-diagnostics / cable-diag / tdr / interface
-        iface_parts = [p for p in parts
-                       if p not in ('cable-diagnostics', 'cable-diag', 'tdr',
-                                    'interface', 'cable')]
-        ports = _parse_ports(','.join(iface_parts)) if iface_parts else None
+    def _print_cable_diag_results(self, ports):
         print('  Running cable diagnostics...')
         results = self.sw.run_cable_diagnostic(ports)
         print(f'\n  {"Port":<6}  {"Status":<16}  Length')
         print(f'  {"------":<6}  {"----------------":<16}  ------')
         for r in results:
             length = f'{r.length_m} m' if r.length_m is not None else '--'
-            status = r.status or '--'
-            print(f'  gi{r.port:<4}  {status:<16}  {length}')
+            print(f'  gi{r.port:<4}  {r.status or "--":<16}  {length}')
         print()
+
+    def do_test(self, args):
+        """test cable-diagnostics interface gi<N>[,<M>]  — run TDR cable test"""
+        if not self._require('exec'):
+            return
+        parts = args.lower().split()
+        iface_parts = [p for p in parts
+                       if p not in ('cable-diagnostics', 'cable-diag', 'tdr',
+                                    'interface', 'cable')]
+        ports = _parse_ports(','.join(iface_parts)) if iface_parts else None
+        self._print_cable_diag_results(ports)
 
     def complete_test(self, text, *_):
         return [s for s in ('cable-diagnostics',) if s.startswith(text)]
@@ -1487,7 +1475,6 @@ class SwitchCLI(cmd.Cmd):
         src, dst = parts[0].lower(), parts[1].lower()
 
         if src == 'running-config':
-            # Backup
             filename = parts[1]  # use original case
             data = self.sw.backup_config()
             with open(filename, 'wb') as f:
@@ -1785,11 +1772,10 @@ class SwitchCLI(cmd.Cmd):
             else:
                 mode_str = 'DSCP'
             print(f'\n  QoS mode: {mode_str}')
-            PRI = {1: 'Lowest', 2: 'Normal', 3: 'Medium', 4: 'Highest'}
             print(f'\n  {"Port":<6}  Priority')
             print(f'  {"------":<6}  --------')
             for qp in qos_ports:
-                print(f'  gi{qp.port:<4}  {PRI.get(qp.priority, str(qp.priority))}')
+                print(f'  gi{qp.port:<4}  {_PORT_PRIORITY_LABELS.get(qp.priority, str(qp.priority))}')
             print()
 
         if sub in ('all', 'bandwidth', 'ban', 'ba'):
@@ -1863,18 +1849,8 @@ class SwitchCLI(cmd.Cmd):
 
     def _show_cable_diag(self, args):
         """show cable-diag [gi<N>]  — run TDR and display results"""
-        ports = None
-        if args:
-            ports = _parse_ports(args[0])
-        print('  Running cable diagnostics...')
-        results = self.sw.run_cable_diagnostic(ports)
-        print(f'\n  {"Port":<6}  {"Status":<16}  Length')
-        print(f'  {"------":<6}  {"----------------":<16}  ------')
-        for r in results:
-            length = f'{r.length_m} m' if r.length_m is not None else '--'
-            status = r.status or '--'
-            print(f'  gi{r.port:<4}  {status:<16}  {length}')
-        print()
+        ports = _parse_ports(args[0]) if args else None
+        self._print_cable_diag_results(ports)
 
     # ------------------------------------------------------------------
     # help
