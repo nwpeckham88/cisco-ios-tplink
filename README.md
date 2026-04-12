@@ -15,6 +15,9 @@ A full test suite passes against this hardware.  Adjacent firmware revisions
 are likely compatible.  Other TP-Link managed switches that share the same
 web UI may also work, though this has not been tested.
 
+Note: the repository now uses a package-first layout (`tplink_tool/*`).
+Legacy root modules (`cli.py`, `sg108e.py`) were removed.
+
 ## Files
 
 | File | Purpose |

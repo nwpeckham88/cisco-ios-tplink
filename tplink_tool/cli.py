@@ -47,24 +47,75 @@ def dim(s):    return _c('2',  s)
 def _parse_ports(spec):
     """
     Parse a port specification into a sorted list of 1-based port numbers.
-    Accepts: '1', '1,3,5', '1-4', '1-3,7', 'gi1', 'gi1-3'.
+    Accepts: '1', '1,3,5', '1-4', '1-3,7', 'gi1', 'gi1-3',
+             'gi1,gi2,gi4-5', 'gi1/0/1-1/0/3'.
     Returns [] on parse error.
     """
-    spec = spec.strip().lower().lstrip('gi').lstrip('port').strip()
+    def _parse_port_atom(token):
+        token = token.strip().lower()
+        token = re.sub(
+            r'^(?:port|gi|gigabitethernet|gige|ethernet|eth)\s*',
+            '',
+            token,
+            flags=re.IGNORECASE,
+        )
+        if not token:
+            return None
+        if re.fullmatch(r'\d+', token):
+            return int(token)
+        if re.fullmatch(r'\d+(?:/\d+)+', token):
+            return int(token.split('/')[-1])
+        return None
+
+    spec = spec.strip().lower()
+    if not spec:
+        return []
     ports = set()
     for part in spec.split(','):
         part = part.strip()
-        if '-' in part:
-            try:
-                lo, hi = part.split('-', 1)
-                ports.update(range(int(lo), int(hi) + 1))
-            except ValueError:
-                return []
-        elif part.isdigit():
-            ports.add(int(part))
-        elif part:
+        if not part:
             return []
+        if '-' in part:
+            lo_raw, hi_raw = part.split('-', 1)
+            lo = _parse_port_atom(lo_raw)
+            hi = _parse_port_atom(hi_raw)
+            if lo is None or hi is None or hi < lo:
+                return []
+            ports.update(range(lo, hi + 1))
+            continue
+        port = _parse_port_atom(part)
+        if port is None:
+            return []
+        ports.add(port)
     return sorted(ports)
+
+
+def _parse_vlan_ids(spec):
+    """Parse VLAN list/range spec like '10,20,30-32' into sorted VLAN IDs."""
+    spec = spec.strip()
+    if not spec:
+        return []
+    vids = set()
+    for part in spec.split(','):
+        part = part.strip()
+        if not part:
+            return []
+        if '-' in part:
+            lo_raw, hi_raw = part.split('-', 1)
+            if not lo_raw.isdigit() or not hi_raw.isdigit():
+                return []
+            lo, hi = int(lo_raw), int(hi_raw)
+            if lo < 1 or hi > 4094 or hi < lo:
+                return []
+            vids.update(range(lo, hi + 1))
+            continue
+        if not part.isdigit():
+            return []
+        vid = int(part)
+        if vid < 1 or vid > 4094:
+            return []
+        vids.add(vid)
+    return sorted(vids)
 
 
 def _port_range_str(ports):
@@ -98,6 +149,17 @@ def _speed_cmd_str(spd):
     if spd == PortSpeed.M1000F:
         return '1000 full'
     return 'auto'
+
+
+def _normalize_command_head(line):
+    """Normalize first command token so hyphenated commands map to handlers."""
+    parts = line.split(None, 1)
+    if not parts:
+        return line
+    head = parts[0].replace('-', '_')
+    if len(parts) == 1:
+        return head
+    return f'{head} {parts[1]}'
 
 
 def _load_keyring():
@@ -253,6 +315,7 @@ class SwitchCLI(cmd.Cmd):
         line = line.strip()
         if not line or line.startswith('!'):
             return
+        line = _normalize_command_head(line)
         try:
             # 'no' prefix — route to _do_no
             if re.match(r'^no\b', line, re.IGNORECASE):
@@ -270,6 +333,7 @@ class SwitchCLI(cmd.Cmd):
             print(f'  % {exc}')
 
     def default(self, line):
+        line = _normalize_command_head(line)
         cmd_word, args, _ = self.parseline(line)
         if not cmd_word:
             return
@@ -286,6 +350,7 @@ class SwitchCLI(cmd.Cmd):
 
     def _do_no(self, args):
         """Dispatch 'no <command> [args]'."""
+        args = _normalize_command_head(args)
         cmd_word, rest, _ = self.parseline(args)
         if not cmd_word:
             print('  % Incomplete command')
@@ -354,14 +419,12 @@ class SwitchCLI(cmd.Cmd):
     # ------------------------------------------------------------------
 
     def do_interface(self, args):
-        """interface {port N | gi N | range port N-M}  — configure port(s)"""
+        """interface {port N | gi N | range gi N-M | range gi N,gi M}  — configure port(s)"""
         if not self._require('config'):
             return
         args = args.strip()
         # Strip leading 'range' keyword
         args = re.sub(r'^range\s+', '', args, flags=re.IGNORECASE)
-        # Strip leading 'port'/'gi' keywords
-        args = re.sub(r'^(port|gi)\s*', '', args, flags=re.IGNORECASE)
         ports = _parse_ports(args)
         if not ports:
             print('  Usage: interface port <N>  or  interface range port <N>-<M>')
@@ -578,37 +641,47 @@ class SwitchCLI(cmd.Cmd):
 
     def _sw_trunk(self, parts):
         """switchport trunk allowed vlan {add|remove} <id>"""
+        usage = '  Usage: switchport trunk allowed vlan {add|remove} <id[,id|range]>'
         if len(parts) < 2:
-            print('  Usage: switchport trunk allowed vlan {add|remove} <id>')
+            print(usage)
             return
         # strip 'allowed vlan' keywords
         while parts and parts[0].lower() in ('allowed', 'vlan'):
             parts = parts[1:]
-        if len(parts) < 2 or not parts[1].isdigit():
-            print('  Usage: switchport trunk allowed vlan {add|remove} <id>')
+        if len(parts) < 2:
+            print(usage)
             return
         action = parts[0].lower()
-        vid    = int(parts[1])
         if action not in ('add', 'remove'):
-            print('  Usage: ... allowed vlan {add|remove} <id>')
+            print(usage)
+            return
+        vlan_spec = ''.join(parts[1:]).replace(' ', '')
+        vids = _parse_vlan_ids(vlan_spec)
+        if not vids:
+            print(usage)
             return
         self._ensure_dot1q()
         _, vlans = self.sw.get_dot1q_vlans()
         vmap = {v.vid: v for v in vlans}
-        v = vmap.get(vid)
-        tagged   = _bits_to_ports(v.tagged_members)   if v else []
-        untagged = _bits_to_ports(v.untagged_members) if v else []
-        for port in self._if_ports:
-            if action == 'add':
-                if port not in tagged:
-                    tagged.append(port)
-                if port in untagged:
-                    untagged.remove(port)
-            else:
-                tagged   = [p for p in tagged   if p != port]
-                untagged = [p for p in untagged if p != port]
-        self.sw.add_dot1q_vlan(vid, name=(v.name if v else ''),
-                               tagged_ports=tagged, untagged_ports=untagged)
+        for vid in vids:
+            v = vmap.get(vid)
+            tagged = _bits_to_ports(v.tagged_members) if v else []
+            untagged = _bits_to_ports(v.untagged_members) if v else []
+            for port in self._if_ports:
+                if action == 'add':
+                    if port not in tagged:
+                        tagged.append(port)
+                    if port in untagged:
+                        untagged.remove(port)
+                else:
+                    tagged = [p for p in tagged if p != port]
+                    untagged = [p for p in untagged if p != port]
+            self.sw.add_dot1q_vlan(
+                vid,
+                name=(v.name if v else ''),
+                tagged_ports=tagged,
+                untagged_ports=untagged,
+            )
 
     def _sw_mode(self, parts):
         """switchport mode {access|trunk} — informational only; no HW change."""

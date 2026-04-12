@@ -2,14 +2,13 @@
 """Quick smoke-test of read operations against the live switch."""
 
 import os
-import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from tplink_tool.sdk import Switch, _bits_to_ports, STORM_RATE_KBPS
+try:
+    from tplink_tool.sdk import Switch, _bits_to_ports, STORM_RATE_KBPS
+except ModuleNotFoundError as exc:
+    if exc.name == 'tplink_tool' or (exc.name or '').startswith('tplink_tool.'):
+        raise SystemExit('Install the package first: pip install -e .') from exc
+    raise
 
 HOST     = os.environ.get('TPLINK_HOST', '10.1.1.239')
 USERNAME = os.environ.get('TPLINK_USER', 'admin')
