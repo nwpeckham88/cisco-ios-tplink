@@ -18,6 +18,7 @@ import argparse
 import getpass
 import textwrap
 import warnings
+from typing import List, NamedTuple
 
 from .sdk import (
     Switch, PortSpeed, QoSMode, StormType, STORM_RATE_KBPS,
@@ -151,6 +152,100 @@ def _speed_cmd_str(spd):
     return 'auto'
 
 
+# ---------------------------------------------------------------------------
+# VLAN health check
+# ---------------------------------------------------------------------------
+
+class VlanIssue(NamedTuple):
+    port: int          # 1-based port number (0 = switch-wide)
+    code: str          # machine-readable issue code
+    description: str   # human-readable problem
+    remediation: str   # suggested fix command(s)
+
+
+def _check_vlan_health(sw) -> List[VlanIssue]:
+    """
+    Inspect the switch's 802.1Q VLAN config and return a list of issues.
+    Returns an empty list when 802.1Q is disabled or the config is clean.
+
+    Checks performed:
+      PVID_NO_VLAN   — port PVID references a VLAN that doesn't exist
+      PVID_NOT_UNTAGGED — port is not an untagged member of its PVID VLAN
+      MULTI_UNTAGGED — port appears as untagged member in more than one VLAN
+    """
+    q_enabled, q_vlans = sw.get_dot1q_vlans()
+    if not q_enabled:
+        return []
+
+    pvids = sw.get_pvids()
+    vlan_ids = {v.vid for v in q_vlans}
+
+    # Build per-port membership maps
+    # untagged_vlans[port] = list of VIDs where this port is untagged
+    untagged_vlans: dict = {}
+    for v in q_vlans:
+        for p in _bits_to_ports(v.untagged_members):
+            untagged_vlans.setdefault(p, []).append(v.vid)
+
+    issues: List[VlanIssue] = []
+
+    for idx, pvid in enumerate(pvids):
+        port = idx + 1
+        untagged_on = untagged_vlans.get(port, [])
+
+        # MULTI_UNTAGGED: port is untagged on more than one VLAN
+        if len(untagged_on) > 1:
+            vids_str = ', '.join(f'vlan {v}' for v in sorted(untagged_on))
+            issues.append(VlanIssue(
+                port=port,
+                code='MULTI_UNTAGGED',
+                description=f'gi{port} is untagged on multiple VLANs ({vids_str})',
+                remediation=(
+                    f'  Keep only one; e.g. to fix as access port on vlan {untagged_on[0]}:\n'
+                    f'    interface port {port}\n'
+                    f'    switchport access vlan {untagged_on[0]}'
+                ),
+            ))
+
+        # PVID_NO_VLAN: PVID points to a VLAN that doesn't exist
+        if pvid not in vlan_ids:
+            issues.append(VlanIssue(
+                port=port,
+                code='PVID_NO_VLAN',
+                description=f'gi{port} PVID={pvid} but VLAN {pvid} does not exist',
+                remediation=(
+                    f'  Create the VLAN first, then add the port:\n'
+                    f'    vlan {pvid}\n'
+                    f'    interface port {port}\n'
+                    f'    switchport access vlan {pvid}\n'
+                    f'  — or reset to an existing VLAN:\n'
+                    f'    interface port {port}\n'
+                    f'    switchport pvid 1'
+                ),
+            ))
+            continue  # skip PVID_NOT_UNTAGGED check; VLAN doesn't exist
+
+        # PVID_NOT_UNTAGGED: port is not an untagged member of its PVID VLAN
+        if pvid not in untagged_on:
+            issues.append(VlanIssue(
+                port=port,
+                code='PVID_NOT_UNTAGGED',
+                description=(
+                    f'gi{port} PVID={pvid} but port is not an untagged member of VLAN {pvid}'
+                ),
+                remediation=(
+                    f'  Add the port as untagged on its PVID VLAN:\n'
+                    f'    interface port {port}\n'
+                    f'    switchport access vlan {pvid}\n'
+                    f'  — or change the PVID to match existing membership:\n'
+                    f'    interface port {port}\n'
+                    f'    switchport pvid {untagged_on[0] if untagged_on else 1}'
+                ),
+            ))
+
+    return issues
+
+
 def _normalize_command_head(line):
     """Normalize first command token so hyphenated commands map to handlers."""
     parts = line.split(None, 1)
@@ -277,6 +372,8 @@ class SwitchCLI(cmd.Cmd):
         self._mode    = 'exec'
         self._if_ports = []   # list of port numbers being configured
         self._vlan_id  = None
+        self._compat_mode  = False          # True when VLAN misconfiguration detected
+        self._vlan_issues: List[VlanIssue] = []
         self._update_prompt()
 
     # ------------------------------------------------------------------
@@ -285,15 +382,16 @@ class SwitchCLI(cmd.Cmd):
 
     def _update_prompt(self):
         n = self._name
+        warn_tag = yellow(' [!COMPAT]') if getattr(self, '_compat_mode', False) else ''
         if self._mode == 'exec':
-            self.prompt = bold(f'{n}# ')
+            self.prompt = bold(f'{n}') + warn_tag + bold('# ')
         elif self._mode == 'config':
-            self.prompt = bold(f'{n}(config)# ')
+            self.prompt = bold(f'{n}') + warn_tag + bold('(config)# ')
         elif self._mode == 'config-if':
             ps = _port_range_str(self._if_ports)
-            self.prompt = bold(f'{n}(config-if-{ps})# ')
+            self.prompt = bold(f'{n}') + warn_tag + bold(f'(config-if-{ps})# ')
         elif self._mode == 'config-vlan':
-            self.prompt = bold(f'{n}(config-vlan-{self._vlan_id})# ')
+            self.prompt = bold(f'{n}') + warn_tag + bold(f'(config-vlan-{self._vlan_id})# ')
 
     def _enter(self, mode, **kw):
         self._mode = mode
@@ -306,6 +404,55 @@ class SwitchCLI(cmd.Cmd):
             print(f'  % Command not available in {self._mode} mode')
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # VLAN health check / mode management
+    # ------------------------------------------------------------------
+
+    def run_vlan_health_check(self, silent: bool = False) -> bool:
+        """
+        Check 802.1Q VLAN configuration for common misconfigurations.
+
+        Sets self._compat_mode = True (and refreshes the prompt) if any
+        issues are found, False otherwise.
+
+        If *silent* is False (the default) and issues exist, prints a
+        banner listing each problem and its remediation tip.
+
+        Returns True if the config is clean (strict mode), False if issues
+        were found (compat mode).
+        """
+        try:
+            issues = _check_vlan_health(self.sw)
+        except Exception:
+            return True  # can't check, assume clean
+
+        self._vlan_issues = issues
+        was_compat = self._compat_mode
+        self._compat_mode = bool(issues)
+        self._update_prompt()
+
+        if issues and not silent:
+            print()
+            print(yellow('  ┌─ VLAN configuration issues detected ──────────────────────────────'))
+            print(yellow('  │  Switching to COMPAT mode. Things may not work as expected until'))
+            print(yellow('  │  the problems below are resolved.'))
+            print(yellow('  │'))
+            for i, issue in enumerate(issues, 1):
+                print(yellow(f'  │  [{i}] {issue.description}'))
+                for rline in issue.remediation.splitlines():
+                    print(yellow(f'  │      {rline}'))
+                if i < len(issues):
+                    print(yellow('  │'))
+            print(yellow('  │'))
+            print(yellow('  │  Run  show vlan-health  at any time to review these issues.'))
+            print(yellow('  └───────────────────────────────────────────────────────────────────'))
+            print()
+        elif not issues and was_compat and not silent:
+            print(green('  VLAN configuration looks healthy — returning to strict mode.'))
+            print()
+
+        return not bool(issues)
 
     # ------------------------------------------------------------------
     # Abbreviation + 'no' dispatch
@@ -607,6 +754,7 @@ class SwitchCLI(cmd.Cmd):
         vid = int(parts[0])
         for p in self._if_ports:
             self.sw.set_pvid([p], vid)
+        self.run_vlan_health_check()
 
     def _sw_access(self, parts):
         """switchport access vlan <id> — set port as untagged on VLAN, update PVID."""
@@ -638,6 +786,7 @@ class SwitchCLI(cmd.Cmd):
             self.sw.add_dot1q_vlan(vid, name=(v.name if v else ''),
                                    tagged_ports=tagged, untagged_ports=untagged)
             self.sw.set_pvid([port], vid)
+        self.run_vlan_health_check()
 
     def _sw_trunk(self, parts):
         """switchport trunk allowed vlan {add|remove} <id>"""
@@ -682,6 +831,7 @@ class SwitchCLI(cmd.Cmd):
                 tagged_ports=tagged,
                 untagged_ports=untagged,
             )
+        self.run_vlan_health_check()
 
     def _sw_mode(self, parts):
         """switchport mode {access|trunk} — informational only; no HW change."""
@@ -1414,6 +1564,7 @@ class SwitchCLI(cmd.Cmd):
             'version':        lambda: self._show_version(),
             'interfaces':     lambda: self._show_interfaces(parts[1:]),
             'vlan':           lambda: self._show_vlan(parts[1:]),
+            'vlan-health':    lambda: self._show_vlan_health(),
             'ip':             lambda: self._show_ip(parts[1:]),
             'running-config': lambda: self._show_running_config(),
             'qos':            lambda: self._show_qos(parts[1:]),
@@ -1436,7 +1587,7 @@ class SwitchCLI(cmd.Cmd):
             print(f'  % Unknown: show {sub}')
 
     def complete_show(self, text, *_):
-        subs = ['version', 'interfaces', 'vlan', 'ip', 'running-config',
+        subs = ['version', 'interfaces', 'vlan', 'vlan-health', 'ip', 'running-config',
                 'qos', 'spanning-tree', 'port-mirror', 'etherchannel',
                 'mtu-vlan', 'cable-diag']
         return [s for s in subs if s.startswith(text)]
@@ -1527,6 +1678,26 @@ class SwitchCLI(cmd.Cmd):
             print()
         else:
             print('  No VLAN configuration active.\n')
+
+    # ---- show vlan-health ----
+
+    def _show_vlan_health(self):
+        """Re-run the health check and display results."""
+        print('  Checking VLAN configuration...')
+        clean = self.run_vlan_health_check(silent=True)
+        mode_str = green('strict') if clean else yellow('compat')
+        print(f'\n  VLAN mode: {bold(mode_str)}\n')
+        if clean:
+            print(green('  No issues found — VLAN configuration is healthy.\n'))
+        else:
+            print(yellow(f'  {len(self._vlan_issues)} issue(s) detected:\n'))
+            for i, issue in enumerate(self._vlan_issues, 1):
+                print(yellow(f'  [{i}] {issue.description}'))
+                print(f'       Code: {dim(issue.code)}')
+                print('       Remediation:')
+                for rline in issue.remediation.splitlines():
+                    print(f'         {rline}')
+                print()
 
     # ---- show ip ----
 
@@ -1716,6 +1887,7 @@ class SwitchCLI(cmd.Cmd):
                 ('show interfaces',          'Port status table'),
                 ('show interfaces counters', 'TX/RX packet counters'),
                 ('show vlan',                '802.1Q / port-based VLAN status'),
+                ('show vlan-health',         'VLAN config health check + remediation'),
                 ('show ip',                  'IP address configuration'),
                 ('show running-config',      'Full configuration listing'),
                 ('show qos',                 'QoS, bandwidth, storm-control'),
@@ -1865,7 +2037,13 @@ def main():
             print(f'Saved password to keychain for {_keychain_account(args)}')
 
         cli = SwitchCLI(sw, hostname)
-        print("Type ? for help.  Type 'exit' to disconnect.\n")
+
+        # Run VLAN health check on connect; switches to compat mode if needed.
+        cli.run_vlan_health_check()
+
+        mode_label = (yellow('COMPAT') if cli._compat_mode else green('strict'))
+        print(f"Type ? for help.  Type 'exit' to disconnect.  "
+              f"VLAN mode: {bold(mode_label)}\n")
 
         try:
             cli.cmdloop()
