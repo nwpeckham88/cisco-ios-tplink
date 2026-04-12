@@ -9,13 +9,21 @@ func TestJsToGoHexAndArrays(t *testing.T) {
 	if got := jsToGo("0xFF"); got != 255 {
 		t.Fatalf("jsToGo hex = %#v", got)
 	}
-	want := []any{255, 1}
 	got, ok := jsToGo("[0xFF, 0x01]").([]any)
 	if !ok {
 		t.Fatalf("expected []any")
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v want %v", got, want)
+	if len(got) != 2 {
+		t.Fatalf("unexpected array length %#v", got)
+	}
+	if _, ok := got[0].(float64); !ok {
+		t.Fatalf("expected float64 element type, got %#v", got[0])
+	}
+	if _, ok := got[1].(float64); !ok {
+		t.Fatalf("expected float64 element type, got %#v", got[1])
+	}
+	if asInt(got[0]) != 255 || asInt(got[1]) != 1 {
+		t.Fatalf("unexpected array %#v", got)
 	}
 }
 
