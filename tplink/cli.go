@@ -243,11 +243,102 @@ func (c *CLI) cmdExit() bool {
 
 func (c *CLI) cmdHelp() {
 	fmt.Printf("\nMode: %s\n", c.mode)
-	fmt.Println("Common: show, configure terminal, interface, vlan, end, exit")
-	fmt.Println("Use shortest unique command prefixes (for example: conf t, sh ver).")
-	fmt.Println("Use '?' for command completion/help (for example: sh ?, interface ?).")
-	fmt.Println("Use 'do show ...' from config modes.")
+	fmt.Println("Available commands:")
+	for _, entry := range helpEntriesForMode(c.mode) {
+		fmt.Printf("  %-50s %s\n", entry.syntax, entry.description)
+	}
 	fmt.Println()
+	fmt.Println("Tips:")
+	if c.mode == ModeExec {
+		fmt.Println("  - Shortest unique prefixes are accepted (for example: conf t, sh ver).")
+	} else {
+		fmt.Println("  - Shortest unique prefixes are accepted (for example: sh int br, sw acc vlan 10).")
+	}
+	fmt.Println("  - Use '?' for command completion/help (for example: sh ?, interface ?).")
+	if c.mode != ModeExec {
+		fmt.Println("  - Use 'do <exec-command>' from configuration modes.")
+	}
+	fmt.Println()
+}
+
+type helpEntry struct {
+	syntax      string
+	description string
+}
+
+func helpEntriesForMode(mode CLIMode) []helpEntry {
+	common := []helpEntry{
+		{syntax: "help | ?", description: "Show contextual help"},
+		{syntax: "exit", description: "Leave current mode (or disconnect from exec mode)"},
+		{syntax: "end", description: "Return directly to exec mode"},
+		{syntax: "quit", description: "Disconnect immediately"},
+	}
+
+	switch mode {
+	case ModeExec:
+		return append(common,
+			helpEntry{syntax: "show <subcommand>", description: "Display switch status and configuration"},
+			helpEntry{syntax: "configure terminal", description: "Enter global configuration mode (alias: conf t)"},
+			helpEntry{syntax: "clear counters [gi<N>]", description: "Clear all counters or a single interface counter"},
+			helpEntry{syntax: "test cable-diagnostics [interface gi<N>]", description: "Run cable diagnostics"},
+			helpEntry{syntax: "copy running-config <file>", description: "Backup running config to file"},
+			helpEntry{syntax: "copy <file> running-config", description: "Restore config from file and reboot"},
+			helpEntry{syntax: "write erase", description: "Factory reset switch and reboot"},
+			helpEntry{syntax: "reload", description: "Reboot switch"},
+		)
+	case ModeConfig:
+		return append(common,
+			helpEntry{syntax: "show <subcommand>", description: "Display switch status and configuration"},
+			helpEntry{syntax: "interface [range] gi<N>[,gi<M>|gi<N>-<M>]", description: "Enter interface configuration mode"},
+			helpEntry{syntax: "vlan <1-4094>", description: "Enter VLAN configuration mode"},
+			helpEntry{syntax: "no vlan <id>", description: "Delete VLAN from 802.1Q table"},
+			helpEntry{syntax: "hostname <name>", description: "Set device description/hostname"},
+			helpEntry{syntax: "ip address dhcp", description: "Enable DHCP addressing"},
+			helpEntry{syntax: "ip address <ip> <mask>", description: "Set static IP and netmask"},
+			helpEntry{syntax: "ip default-gateway <ip>", description: "Set default gateway"},
+			helpEntry{syntax: "no ip address dhcp", description: "Disable DHCP and keep current static values"},
+			helpEntry{syntax: "spanning-tree | no spanning-tree", description: "Enable/disable loop prevention"},
+			helpEntry{syntax: "igmp snooping [report-suppression]", description: "Enable IGMP snooping"},
+			helpEntry{syntax: "no igmp snooping", description: "Disable IGMP snooping"},
+			helpEntry{syntax: "led | no led", description: "Enable/disable front-panel LEDs"},
+			helpEntry{syntax: "username admin password <old> <new>", description: "Change admin password"},
+			helpEntry{syntax: "qos mode {port-based|dot1p|dscp}", description: "Set global QoS mode"},
+			helpEntry{syntax: "monitor session 1 destination interface gi<N>", description: "Set mirror destination"},
+			helpEntry{syntax: "monitor session 1 source interface gi<N> [rx|tx|both]", description: "Add mirror source"},
+			helpEntry{syntax: "no monitor", description: "Disable port mirroring"},
+			helpEntry{syntax: "mtu-vlan uplink gi<N> | no mtu-vlan", description: "Enable/disable MTU VLAN"},
+			helpEntry{syntax: "port-vlan mode enable | no port-vlan mode", description: "Enable/disable port-based VLAN mode"},
+			helpEntry{syntax: "port-vlan <id> members gi<N>[,gi<M>]", description: "Create/modify port-based VLAN"},
+			helpEntry{syntax: "no port-vlan <id>", description: "Delete port-based VLAN"},
+			helpEntry{syntax: "do show <subcommand>", description: "Run exec show command from config mode"},
+		)
+	case ModeConfigIF:
+		return append(common,
+			helpEntry{syntax: "show <subcommand>", description: "Display switch status and configuration"},
+			helpEntry{syntax: "shutdown | no shutdown", description: "Disable/enable selected interfaces"},
+			helpEntry{syntax: "speed {auto|10|100|1000} [half|full]", description: "Set interface speed/duplex"},
+			helpEntry{syntax: "flowcontrol | no flowcontrol", description: "Enable/disable flow control"},
+			helpEntry{syntax: "switchport access vlan <id>", description: "Set access VLAN"},
+			helpEntry{syntax: "switchport trunk allowed vlan {add|remove} <id[,range]>", description: "Manage trunk VLAN membership"},
+			helpEntry{syntax: "switchport pvid <id>", description: "Set port PVID"},
+			helpEntry{syntax: "switchport mode {access|trunk}", description: "Document intended mode (informational)"},
+			helpEntry{syntax: "channel-group {1|2} | no channel-group {1|2}", description: "Add/remove from LAG group"},
+			helpEntry{syntax: "qos port-priority <1-4>", description: "Set interface QoS priority"},
+			helpEntry{syntax: "bandwidth {ingress|egress} <kbps>", description: "Set bandwidth limit"},
+			helpEntry{syntax: "no bandwidth [ingress|egress]", description: "Clear bandwidth limits"},
+			helpEntry{syntax: "storm-control {broadcast|multicast|unknown-unicast|all} rate <1-12>", description: "Enable storm control"},
+			helpEntry{syntax: "no storm-control", description: "Disable storm control"},
+			helpEntry{syntax: "do show <subcommand>", description: "Run exec show command from interface mode"},
+		)
+	case ModeConfigVLAN:
+		return append(common,
+			helpEntry{syntax: "show <subcommand>", description: "Display switch status and configuration"},
+			helpEntry{syntax: "name <text>", description: "Set VLAN display name"},
+			helpEntry{syntax: "do show <subcommand>", description: "Run exec show command from VLAN mode"},
+		)
+	default:
+		return common
+	}
 }
 
 func (c *CLI) requireMode(modes ...CLIMode) error {
@@ -263,12 +354,20 @@ func (c *CLI) cmdConfigure(args string) error {
 	if err := c.requireMode(ModeExec); err != nil {
 		return err
 	}
-	sub := strings.ToLower(strings.TrimSpace(args))
-	if sub == "" || strings.HasPrefix("terminal", sub) {
+	parts := strings.Fields(strings.ToLower(args))
+	if len(parts) == 0 {
 		c.mode = ModeConfig
 		return nil
 	}
-	return fmt.Errorf("usage: configure terminal")
+	if len(parts) != 1 {
+		return fmt.Errorf("usage: configure terminal")
+	}
+	sub, err := resolveKeyword(parts[0], []string{"terminal"})
+	if err != nil || sub != "terminal" {
+		return fmt.Errorf("usage: configure terminal")
+	}
+	c.mode = ModeConfig
+	return nil
 }
 
 func (c *CLI) cmdInterface(args string) error {

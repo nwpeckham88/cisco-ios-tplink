@@ -119,6 +119,45 @@ func TestShowAmbiguousSubcommand(t *testing.T) {
 	}
 }
 
+func TestCmdHelpIsModeAwareAndCurrent(t *testing.T) {
+	c := &CLI{mode: ModeConfigIF}
+	out := captureStdout(t, func() {
+		c.cmdHelp()
+	})
+	if !strings.Contains(out, "switchport access vlan <id>") {
+		t.Fatalf("missing switchport help entry: %q", out)
+	}
+	if !strings.Contains(out, "qos port-priority <1-4>") {
+		t.Fatalf("missing qos help entry: %q", out)
+	}
+	if strings.Contains(out, "conf t") {
+		t.Fatalf("conf t should not be suggested in config-if mode: %q", out)
+	}
+	if !strings.Contains(out, "do <exec-command>") {
+		t.Fatalf("missing do tip for config mode: %q", out)
+	}
+	if !strings.Contains(out, "show <subcommand>") {
+		t.Fatalf("missing direct show help entry: %q", out)
+	}
+}
+
+func TestCmdConfigureAcceptsTerminalAbbreviation(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+	if err := c.cmdConfigure("t"); err != nil {
+		t.Fatalf("cmdConfigure(t) failed: %v", err)
+	}
+	if c.mode != ModeConfig {
+		t.Fatalf("mode=%s want=%s", c.mode, ModeConfig)
+	}
+}
+
+func TestCmdConfigureRejectedOutsideExec(t *testing.T) {
+	c := &CLI{mode: ModeConfigIF}
+	if err := c.cmdConfigure("t"); err == nil {
+		t.Fatal("expected configure terminal to be rejected outside exec mode")
+	}
+}
+
 func TestHandleQuestionSupportsNoAndDoContexts(t *testing.T) {
 	c := &CLI{mode: ModeConfig}
 
