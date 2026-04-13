@@ -1352,10 +1352,46 @@ func (c *CLI) cmdWrite(args string) (bool, error) {
 	if err := c.requireMode(ModeExec); err != nil {
 		return false, err
 	}
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(args)), "er") {
+	part := strings.ToLower(strings.TrimSpace(args))
+	if sub, err := resolveKeyword(part, []string{"erase"}); err != nil || sub != "erase" {
 		return false, fmt.Errorf("usage: write erase")
 	}
-	if !confirm("  Factory reset? ALL configuration will be lost. [y/N] ") {
+
+	currentIP := "(unavailable)"
+	if ip, err := c.client.GetIPSettings(); err == nil {
+		if strings.TrimSpace(ip.IP) != "" {
+			currentIP = ip.IP
+		}
+	}
+
+	vlanSummary := "(unavailable)"
+	pvidSummary := "(unavailable)"
+	if enabled, vlans, err := c.client.GetDot1QVLANS(); err == nil {
+		if enabled {
+			portCount := c.client.portCount
+			if portCount <= 0 {
+				portCount = 8
+			}
+			vlanSummary = formatDot1QVLANSummary(vlans, portCount)
+			if pvids, err := c.client.GetPVIDs(); err == nil {
+				pvidSummary = formatPVIDSummary(pvids)
+			}
+		} else {
+			vlanSummary = "802.1Q disabled"
+			pvidSummary = "n/a"
+		}
+	}
+
+	fmt.Println("  WARNING: This will permanently erase ALL switch configuration:")
+	fmt.Println("    - IP address will reset to 192.168.0.1 (DHCP disabled)")
+	fmt.Println("    - All VLAN assignments and PVIDs will be lost")
+	fmt.Println("    - All port speed/duplex overrides will be lost")
+	fmt.Println("    - Admin password will reset to firmware default")
+	fmt.Printf("  Current IP:    %s\n", currentIP)
+	fmt.Printf("  Current VLANs: %s\n", vlanSummary)
+	fmt.Printf("  Current PVIDs: %s\n", pvidSummary)
+
+	if promptInput("  Type RESET to confirm factory reset (or anything else to cancel): ") != "RESET" {
 		fmt.Println("  Cancelled")
 		return false, nil
 	}
@@ -1363,6 +1399,7 @@ func (c *CLI) cmdWrite(args string) (bool, error) {
 		return false, err
 	}
 	fmt.Println("  Factory reset initiated. Switch is rebooting...")
+	fmt.Println("  Reconnect to 192.168.0.1 after reboot.")
 	return true, nil
 }
 
@@ -2339,12 +2376,53 @@ func ternary[T any](cond bool, yes T, no T) T {
 	return no
 }
 
-func confirm(prompt string) bool {
+func formatDot1QVLANSummary(vlans []Dot1QVlanEntry, portCount int) string {
+	if len(vlans) == 0 {
+		return "(none)"
+	}
+	sorted := append([]Dot1QVlanEntry{}, vlans...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].VID < sorted[j].VID
+	})
+	entries := make([]string, 0, len(sorted))
+	for _, v := range sorted {
+		parts := []string{}
+		tagged := BitsToPorts(v.TaggedMembers, portCount)
+		if len(tagged) > 0 {
+			parts = append(parts, fmt.Sprintf("tagged: %s", portRangeString(tagged)))
+		}
+		untagged := BitsToPorts(v.UntaggedMembers, portCount)
+		if len(untagged) > 0 {
+			parts = append(parts, fmt.Sprintf("untagged: %s", portRangeString(untagged)))
+		}
+		if len(parts) == 0 {
+			parts = append(parts, "no members")
+		}
+		entries = append(entries, fmt.Sprintf("%d (%s)", v.VID, strings.Join(parts, ", ")))
+	}
+	return strings.Join(entries, ", ")
+}
+
+func formatPVIDSummary(pvids []int) string {
+	if len(pvids) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(pvids))
+	for i, pvid := range pvids {
+		parts = append(parts, fmt.Sprintf("gi%d:%d", i+1, pvid))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func promptInput(prompt string) string {
 	fmt.Print(prompt)
 	r := bufio.NewReader(os.Stdin)
 	line, _ := r.ReadString('\n')
-	line = strings.TrimSpace(strings.ToLower(line))
-	return line == "y"
+	return strings.TrimSpace(line)
+}
+
+func confirm(prompt string) bool {
+	return strings.ToLower(promptInput(prompt)) == "y"
 }
 
 func filterTokens(in []string, drop ...string) []string {

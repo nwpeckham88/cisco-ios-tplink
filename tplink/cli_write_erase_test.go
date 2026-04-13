@@ -1,0 +1,144 @@
+package tplink
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+func newWriteEraseCLI(t *testing.T) (*CLI, *atomic.Int32) {
+	t.Helper()
+
+	var resetCalls atomic.Int32
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/logon.cgi":
+			http.SetCookie(w, &http.Cookie{Name: "H_P_SSID", Value: "ok"})
+			fmt.Fprint(w, "<script>errType=0</script>")
+		case "/PortSettingRpm.htm":
+			fmt.Fprint(w, `<script>var max_port_num = 8;</script>`)
+		case "/IpSettingRpm.htm":
+			fmt.Fprint(w, `<script>var ip_ds = {state:0, ipStr:['10.1.1.239'], netmaskStr:['255.255.255.0'], gatewayStr:['10.1.1.1']};</script>`)
+		case "/Vlan8021QRpm.htm":
+			fmt.Fprint(w, `<script>var qvlan_ds = {state:1, count:2, vids:[1,10], names:['VLAN1','Users'], tagMbrs:[0,3], untagMbrs:[255,28]};</script>`)
+		case "/Vlan8021QPvidRpm.htm":
+			fmt.Fprint(w, `<script>var pvid_ds = {pvids:[1,1,10,10,10,1,1,1]};</script>`)
+		case "/reset.cgi":
+			resetCalls.Add(1)
+			fmt.Fprint(w, "ok")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	return NewCLI(client, "switch"), &resetCalls
+}
+
+func withStdinInput(t *testing.T, input string, fn func()) {
+	t.Helper()
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	if _, err := io.WriteString(w, input); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	_ = w.Close()
+
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	fn()
+}
+
+func TestWriteEraseRequiresExactResetToken(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "reset\n", func() {
+			quit, err := c.cmdWrite("erase")
+			if err != nil {
+				t.Fatalf("cmdWrite: %v", err)
+			}
+			if quit {
+				t.Fatal("expected CLI to continue after cancelled reset")
+			}
+		})
+	})
+
+	if resetCalls.Load() != 0 {
+		t.Fatalf("FactoryReset should not be called for lowercase token, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "Type RESET to confirm") {
+		t.Fatalf("missing RESET confirmation prompt in output: %q", out)
+	}
+	if !strings.Contains(out, "Cancelled") {
+		t.Fatalf("missing cancellation message in output: %q", out)
+	}
+}
+
+func TestWriteEraseExecutesOnCorrectToken(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "RESET\n", func() {
+			quit, err := c.cmdWrite("erase")
+			if err != nil {
+				t.Fatalf("cmdWrite: %v", err)
+			}
+			if !quit {
+				t.Fatal("expected CLI to exit after factory reset")
+			}
+		})
+	})
+
+	if resetCalls.Load() != 1 {
+		t.Fatalf("FactoryReset should be called exactly once, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "192.168.0.1") {
+		t.Fatalf("expected reconnect advisory to include default IP, got: %q", out)
+	}
+}
+
+func TestWriteEraseShowsVLANSummary(t *testing.T) {
+	c, _ := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "cancel\n", func() {
+			_, _ = c.cmdWrite("erase")
+		})
+	})
+
+	if !strings.Contains(out, "Current VLANs:") {
+		t.Fatalf("missing VLAN summary header in output: %q", out)
+	}
+	if !strings.Contains(out, "10") || !strings.Contains(out, "tagged") || !strings.Contains(out, "untagged") {
+		t.Fatalf("missing expected VLAN details in output: %q", out)
+	}
+}
+
+func TestWriteEraseShowsIPAddress(t *testing.T) {
+	c, _ := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "cancel\n", func() {
+			_, _ = c.cmdWrite("erase")
+		})
+	})
+
+	if !strings.Contains(out, "Current IP:") {
+		t.Fatalf("missing Current IP line in output: %q", out)
+	}
+	if !strings.Contains(out, "10.1.1.239") {
+		t.Fatalf("missing expected IP value in output: %q", out)
+	}
+}
