@@ -85,6 +85,149 @@ func TestCompletionCandidates(t *testing.T) {
 	if got := c.completionCandidates(ModeConfig, true, nil, "sp"); !reflect.DeepEqual(got, []string{"spanning-tree"}) {
 		t.Fatalf("no-form completion got=%v", got)
 	}
+
+	if got := c.completionCandidates(ModeExec, false, []string{"configure", "terminal"}, ""); got != nil {
+		t.Fatalf("expected no completion candidates for completed non-show subcommand, got=%v", got)
+	}
+}
+
+func TestCompletionContextForLine(t *testing.T) {
+	c := &CLI{mode: ModeConfig}
+
+	tests := []struct {
+		name       string
+		line       string
+		wantMode   CLIMode
+		wantNoForm bool
+		wantTokens []string
+		wantPart   string
+	}{
+		{
+			name:       "plain partial",
+			line:       "show v",
+			wantMode:   ModeConfig,
+			wantNoForm: false,
+			wantTokens: []string{"show"},
+			wantPart:   "v",
+		},
+		{
+			name:       "trailing space means next token",
+			line:       "show ",
+			wantMode:   ModeConfig,
+			wantNoForm: false,
+			wantTokens: []string{"show"},
+			wantPart:   "",
+		},
+		{
+			name:       "do prefix switches to exec mode",
+			line:       "do sh",
+			wantMode:   ModeExec,
+			wantNoForm: false,
+			wantTokens: []string{},
+			wantPart:   "sh",
+		},
+		{
+			name:       "no prefix enables no-form",
+			line:       "no sp",
+			wantMode:   ModeConfig,
+			wantNoForm: true,
+			wantTokens: []string{},
+			wantPart:   "sp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := c.completionContextForLine(tt.line)
+			if ctx.mode != tt.wantMode {
+				t.Fatalf("mode=%s want=%s", ctx.mode, tt.wantMode)
+			}
+			if ctx.noForm != tt.wantNoForm {
+				t.Fatalf("noForm=%v want=%v", ctx.noForm, tt.wantNoForm)
+			}
+			if !reflect.DeepEqual(ctx.tokens, tt.wantTokens) {
+				t.Fatalf("tokens=%v want=%v", ctx.tokens, tt.wantTokens)
+			}
+			if ctx.partial != tt.wantPart {
+				t.Fatalf("partial=%q want=%q", ctx.partial, tt.wantPart)
+			}
+		})
+	}
+}
+
+func TestApplyTabCompletion(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+
+	tests := []struct {
+		name        string
+		line        string
+		mode        CLIMode
+		wantLine    string
+		wantChanged bool
+	}{
+		{
+			name:        "unique top-level completion",
+			line:        "sh",
+			mode:        ModeExec,
+			wantLine:    "show ",
+			wantChanged: true,
+		},
+		{
+			name:        "unique nested completion",
+			line:        "show interf",
+			mode:        ModeExec,
+			wantLine:    "show interfaces ",
+			wantChanged: true,
+		},
+		{
+			name:        "ambiguous with longest-common-prefix growth",
+			line:        "show vl",
+			mode:        ModeExec,
+			wantLine:    "show vlan",
+			wantChanged: true,
+		},
+		{
+			name:        "ambiguous without growth stays unchanged",
+			line:        "show v",
+			mode:        ModeExec,
+			wantLine:    "show v",
+			wantChanged: false,
+		},
+		{
+			name:        "no-form completion uses config no commands",
+			line:        "no sp",
+			mode:        ModeConfig,
+			wantLine:    "no spanning-tree ",
+			wantChanged: true,
+		},
+		{
+			name:        "unknown token unchanged",
+			line:        "zzz",
+			mode:        ModeExec,
+			wantLine:    "zzz",
+			wantChanged: false,
+		},
+		{
+			name:        "completed non-show subcommand is not duplicated",
+			line:        "configure terminal ",
+			mode:        ModeExec,
+			wantLine:    "configure terminal ",
+			wantChanged: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c.mode = tt.mode
+			got, changed := c.applyTabCompletion(tt.line)
+			if got != tt.wantLine {
+				t.Fatalf("line=%q want=%q", got, tt.wantLine)
+			}
+			if changed != tt.wantChanged {
+				t.Fatalf("changed=%v want=%v", changed, tt.wantChanged)
+			}
+		})
+	}
 }
 
 func TestExecLineAcceptsAbbreviations(t *testing.T) {

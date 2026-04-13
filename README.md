@@ -29,6 +29,13 @@ go run ./cmd/tplink-cli 192.168.0.1 --user admin
 go run ./cmd/tplink-cli --user admin 192.168.0.1
 ```
 
+Interactive completion (TTY mode):
+
+- Press `?` to show context-aware command help immediately (no Enter required)
+- Press `Tab` to complete commands using shortest unique matches
+
+When stdin is not a terminal (for example piped input), the CLI uses line-based input behavior.
+
 Optional auth flags:
 
 ```bash

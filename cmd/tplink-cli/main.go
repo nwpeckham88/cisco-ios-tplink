@@ -83,7 +83,7 @@ func main() {
 
 	fmt.Println("OK")
 	fmt.Printf("  %s  |  FW: %s  |  IP: %s\n\n", info.Description, info.Firmware, info.IP)
-	fmt.Println("Type ? for help. Type 'exit' to disconnect.")
+	fmt.Println("In interactive terminals: press ? for immediate help and Tab for completion. Type 'exit' to disconnect.")
 	fmt.Println()
 
 	cli := tplink.NewCLI(client, hostname)

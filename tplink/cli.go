@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 type CLIMode string
@@ -50,25 +53,129 @@ func (c *CLI) prompt() string {
 }
 
 func (c *CLI) Run() error {
+	stdinFD := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFD) {
+		return c.runInteractiveTTY(stdinFD)
+	}
+	return c.runLineScanner()
+}
+
+func (c *CLI) runLineScanner() error {
 	s := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print(c.prompt())
 		if !s.Scan() {
 			fmt.Println()
+			if err := s.Err(); err != nil {
+				return err
+			}
 			return nil
 		}
-		line := strings.TrimSpace(s.Text())
-		if line == "" || strings.HasPrefix(line, "!") {
-			continue
-		}
-		quit, err := c.execLine(line)
-		if err != nil {
-			fmt.Printf("  %% %v\n", err)
-		}
-		if quit {
+		if c.executeInputLine(s.Text()) {
 			return nil
 		}
 	}
+}
+
+func (c *CLI) runInteractiveTTY(stdinFD int) error {
+	originalState, err := term.MakeRaw(stdinFD)
+	if err != nil {
+		return c.runLineScanner()
+	}
+	defer func() {
+		_ = term.Restore(stdinFD, originalState)
+	}()
+
+	reader := bufio.NewReader(os.Stdin)
+	line := ""
+	escPrefix := false
+	inEscapeSequence := false
+
+	fmt.Print(c.prompt())
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Println()
+				return nil
+			}
+			return err
+		}
+
+		if inEscapeSequence {
+			if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~' {
+				inEscapeSequence = false
+			}
+			continue
+		}
+
+		if escPrefix {
+			escPrefix = false
+			if b == '[' || b == 'O' {
+				inEscapeSequence = true
+				continue
+			}
+		}
+
+		switch b {
+		case 3: // Ctrl+C
+			line = ""
+			fmt.Print("^C\r\n")
+			fmt.Print(c.prompt())
+		case 4: // Ctrl+D
+			if line == "" {
+				fmt.Println()
+				return nil
+			}
+		case '\r', '\n':
+			fmt.Print("\r\n")
+			if c.executeInputLine(line) {
+				return nil
+			}
+			line = ""
+			fmt.Print(c.prompt())
+		case 8, 127:
+			if line != "" {
+				line = line[:len(line)-1]
+				fmt.Print("\b \b")
+			}
+		case '\t':
+			updated, changed := c.applyTabCompletion(line)
+			if changed {
+				line = updated
+				c.redrawInteractiveLine(line)
+			}
+		case '?':
+			_, qErr := c.handleQuestion(line + "?")
+			if qErr != nil {
+				fmt.Printf("  %% %v\n", qErr)
+			}
+			c.redrawInteractiveLine(line)
+		case 27:
+			escPrefix = true
+		default:
+			if b >= 32 && b <= 126 {
+				line += string(b)
+				fmt.Printf("%c", b)
+			}
+		}
+	}
+}
+
+func (c *CLI) executeInputLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "!") {
+		return false
+	}
+	quit, err := c.execLine(trimmed)
+	if err != nil {
+		fmt.Printf("  %% %v\n", err)
+	}
+	return quit
+}
+
+func (c *CLI) redrawInteractiveLine(line string) {
+	fmt.Printf("\r%s%s\x1b[K", c.prompt(), line)
 }
 
 func (c *CLI) execLine(line string) (bool, error) {
@@ -1826,6 +1933,114 @@ func showSubcommandChildren(sub string) []string {
 	}
 }
 
+type completionContext struct {
+	mode    CLIMode
+	noForm  bool
+	tokens  []string
+	partial string
+}
+
+func (c *CLI) completionContextForLine(line string) completionContext {
+	ctx := completionContext{mode: c.mode}
+	trailingSpace := strings.HasSuffix(line, " ")
+	remaining := strings.TrimSpace(line)
+
+	parts := strings.Fields(remaining)
+	if len(parts) > 0 && normalizeKeyword(parts[0]) == "do" {
+		ctx.mode = ModeExec
+		if len(parts) > 1 {
+			remaining = strings.Join(parts[1:], " ")
+		} else {
+			remaining = ""
+		}
+	}
+
+	parts = strings.Fields(remaining)
+	if len(parts) > 0 && normalizeKeyword(parts[0]) == "no" {
+		ctx.noForm = true
+		if len(parts) > 1 {
+			remaining = strings.Join(parts[1:], " ")
+		} else {
+			remaining = ""
+		}
+	}
+
+	ctx.tokens = strings.Fields(remaining)
+	if !trailingSpace && len(ctx.tokens) > 0 {
+		ctx.partial = ctx.tokens[len(ctx.tokens)-1]
+		ctx.tokens = ctx.tokens[:len(ctx.tokens)-1]
+	}
+	return ctx
+}
+
+func longestCommonPrefix(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	prefix := values[0]
+	for _, candidate := range values[1:] {
+		for !strings.HasPrefix(candidate, prefix) {
+			if prefix == "" {
+				return ""
+			}
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	return prefix
+}
+
+func replaceLinePartial(line, partial, replacement string, addTrailingSpace bool) string {
+	if partial == "" {
+		out := line
+		if out == "" {
+			out = replacement
+		} else if strings.HasSuffix(out, " ") {
+			out += replacement
+		} else {
+			out += " " + replacement
+		}
+		if addTrailingSpace {
+			out += " "
+		}
+		return out
+	}
+
+	trimmed := strings.TrimRight(line, " \t")
+	start := strings.LastIndexAny(trimmed, " \t")
+	if start < 0 {
+		trimmed = replacement
+	} else {
+		trimmed = trimmed[:start+1] + replacement
+	}
+	if addTrailingSpace {
+		trimmed += " "
+	}
+	return trimmed
+}
+
+func (c *CLI) applyTabCompletion(line string) (string, bool) {
+	ctx := c.completionContextForLine(line)
+	candidates := c.completionCandidates(ctx.mode, ctx.noForm, ctx.tokens, ctx.partial)
+	if len(candidates) == 0 {
+		return line, false
+	}
+
+	if len(candidates) == 1 {
+		return replaceLinePartial(line, ctx.partial, candidates[0], true), true
+	}
+
+	if ctx.partial == "" {
+		return line, false
+	}
+
+	lcp := longestCommonPrefix(candidates)
+	if len(lcp) <= len(normalizeKeyword(ctx.partial)) {
+		return line, false
+	}
+
+	return replaceLinePartial(line, ctx.partial, lcp, false), true
+}
+
 func (c *CLI) completionCandidates(mode CLIMode, noForm bool, tokens []string, partial string) []string {
 	cmds := commandKeywordsForMode(mode, noForm)
 	if len(tokens) == 0 {
@@ -1845,6 +2060,9 @@ func (c *CLI) completionCandidates(mode CLIMode, noForm bool, tokens []string, p
 	}
 	cmd := matchedTop[0]
 	if cmd != "show" {
+		if len(tokens) > 1 {
+			return nil
+		}
 		return prefixMatches(partial, subcommandKeywords(cmd))
 	}
 
@@ -1867,39 +2085,8 @@ func (c *CLI) handleQuestion(line string) (bool, error) {
 		return true, fmt.Errorf("place ? at the end of the command")
 	}
 
-	beforeQ := strings.TrimSuffix(line, "?")
-	trailingSpaceBeforeQ := strings.HasSuffix(beforeQ, " ")
-	beforeQ = strings.TrimSpace(beforeQ)
-
-	mode := c.mode
-	noForm := false
-	parts := strings.Fields(beforeQ)
-	if len(parts) > 0 && normalizeKeyword(parts[0]) == "do" {
-		mode = ModeExec
-		if len(parts) > 1 {
-			beforeQ = strings.Join(parts[1:], " ")
-		} else {
-			beforeQ = ""
-		}
-	}
-	parts = strings.Fields(beforeQ)
-	if len(parts) > 0 && normalizeKeyword(parts[0]) == "no" {
-		noForm = true
-		if len(parts) > 1 {
-			beforeQ = strings.Join(parts[1:], " ")
-		} else {
-			beforeQ = ""
-		}
-	}
-
-	tokens := strings.Fields(beforeQ)
-	partial := ""
-	if !trailingSpaceBeforeQ && len(tokens) > 0 {
-		partial = tokens[len(tokens)-1]
-		tokens = tokens[:len(tokens)-1]
-	}
-
-	candidates := c.completionCandidates(mode, noForm, tokens, partial)
+	ctx := c.completionContextForLine(strings.TrimSuffix(line, "?"))
+	candidates := c.completionCandidates(ctx.mode, ctx.noForm, ctx.tokens, ctx.partial)
 	fmt.Println()
 	if len(candidates) == 0 {
 		fmt.Println("  % no matching completions")
