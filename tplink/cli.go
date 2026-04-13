@@ -30,6 +30,22 @@ type CLI struct {
 	vlanID   int
 }
 
+type interactiveInputState struct {
+	line             string
+	escPrefix        bool
+	inEscapeSequence bool
+}
+
+type interactiveInputResult struct {
+	state          interactiveInputState
+	echo           string
+	shouldQuestion bool
+	shouldExecute  bool
+	executeLine    string
+	shouldQuit     bool
+	shouldRedraw   bool
+}
+
 func NewCLI(client *Client, hostname string) *CLI {
 	if hostname == "" {
 		hostname = "switch"
@@ -87,9 +103,7 @@ func (c *CLI) runInteractiveTTY(stdinFD int) error {
 	}()
 
 	reader := bufio.NewReader(os.Stdin)
-	line := ""
-	escPrefix := false
-	inEscapeSequence := false
+	state := interactiveInputState{}
 
 	fmt.Print(c.prompt())
 	for {
@@ -102,63 +116,100 @@ func (c *CLI) runInteractiveTTY(stdinFD int) error {
 			return err
 		}
 
-		if inEscapeSequence {
-			if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~' {
-				inEscapeSequence = false
-			}
-			continue
+		result := c.processInteractiveByte(state, b)
+		state = result.state
+
+		if result.echo != "" {
+			fmt.Print(result.echo)
 		}
 
-		if escPrefix {
-			escPrefix = false
-			if b == '[' || b == 'O' {
-				inEscapeSequence = true
-				continue
-			}
+		if result.shouldQuit {
+			return nil
 		}
 
-		switch b {
-		case 3: // Ctrl+C
-			line = ""
-			fmt.Print("^C\r\n")
-			fmt.Print(c.prompt())
-		case 4: // Ctrl+D
-			if line == "" {
-				fmt.Println()
-				return nil
-			}
-		case '\r', '\n':
-			fmt.Print("\r\n")
-			if c.executeInputLine(line) {
-				return nil
-			}
-			line = ""
-			fmt.Print(c.prompt())
-		case 8, 127:
-			if line != "" {
-				line = line[:len(line)-1]
-				fmt.Print("\b \b")
-			}
-		case '\t':
-			updated, changed := c.applyTabCompletion(line)
-			if changed {
-				line = updated
-				c.redrawInteractiveLine(line)
-			}
-		case '?':
-			_, qErr := c.handleQuestion(line + "?")
+		if result.shouldQuestion {
+			_, qErr := c.handleQuestion(state.line + "?")
 			if qErr != nil {
 				fmt.Printf("  %% %v\n", qErr)
 			}
-			c.redrawInteractiveLine(line)
-		case 27:
-			escPrefix = true
-		default:
-			if b >= 32 && b <= 126 {
-				line += string(b)
-				fmt.Printf("%c", b)
-			}
 		}
+
+		if result.shouldExecute {
+			if c.executeInputLine(result.executeLine) {
+				return nil
+			}
+			fmt.Print(c.prompt())
+			continue
+		}
+
+		if result.shouldRedraw {
+			c.redrawInteractiveLine(state.line)
+		}
+	}
+}
+
+func (c *CLI) processInteractiveByte(state interactiveInputState, b byte) interactiveInputResult {
+	result := interactiveInputResult{state: state}
+
+	if state.inEscapeSequence {
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~' {
+			result.state.inEscapeSequence = false
+		}
+		return result
+	}
+
+	if state.escPrefix {
+		result.state.escPrefix = false
+		if b == '[' || b == 'O' {
+			result.state.inEscapeSequence = true
+			return result
+		}
+	}
+
+	switch b {
+	case 3: // Ctrl+C
+		result.state.line = ""
+		result.echo = "^C\r\n"
+		result.shouldRedraw = true
+		return result
+	case 4: // Ctrl+D
+		if result.state.line == "" {
+			result.echo = "\r\n"
+			result.shouldQuit = true
+		}
+		return result
+	case '\r', '\n':
+		result.echo = "\r\n"
+		result.shouldExecute = true
+		result.executeLine = result.state.line
+		result.state.line = ""
+		return result
+	case 8, 127:
+		if result.state.line != "" {
+			result.state.line = result.state.line[:len(result.state.line)-1]
+			result.echo = "\b \b"
+		}
+		return result
+	case '\t':
+		updated, changed := c.applyTabCompletion(result.state.line)
+		if changed {
+			result.state.line = updated
+			result.shouldRedraw = true
+		}
+		return result
+	case '?':
+		result.shouldQuestion = true
+		result.shouldRedraw = true
+		return result
+	case 27:
+		result.state.escPrefix = true
+		return result
+	default:
+		if b >= 32 && b <= 126 {
+			result.state.line += string(b)
+			result.echo = string(b)
+		}
+		return result
 	}
 }
 

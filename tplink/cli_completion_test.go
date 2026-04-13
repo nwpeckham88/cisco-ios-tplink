@@ -230,6 +230,105 @@ func TestApplyTabCompletion(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveByteEscPrefixThenPrintable(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+	state := interactiveInputState{}
+
+	res := c.processInteractiveByte(state, 27)
+	if !res.state.escPrefix || res.state.inEscapeSequence {
+		t.Fatalf("unexpected esc state: %+v", res.state)
+	}
+	if res.echo != "" || res.shouldExecute || res.shouldQuestion || res.shouldQuit || res.shouldRedraw {
+		t.Fatalf("unexpected side effects after esc: %+v", res)
+	}
+
+	res = c.processInteractiveByte(res.state, 'x')
+	if res.state.escPrefix || res.state.inEscapeSequence {
+		t.Fatalf("expected esc state cleared: %+v", res.state)
+	}
+	if res.state.line != "x" {
+		t.Fatalf("line=%q want=%q", res.state.line, "x")
+	}
+	if res.echo != "x" {
+		t.Fatalf("echo=%q want=%q", res.echo, "x")
+	}
+}
+
+func TestProcessInteractiveByteConsumesEscapeSequence(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+	state := interactiveInputState{}
+
+	res := c.processInteractiveByte(state, 27)
+	res = c.processInteractiveByte(res.state, '[')
+	if !res.state.inEscapeSequence {
+		t.Fatalf("expected to enter escape sequence: %+v", res.state)
+	}
+
+	res = c.processInteractiveByte(res.state, 'A')
+	if res.state.inEscapeSequence {
+		t.Fatalf("expected escape sequence to finish: %+v", res.state)
+	}
+	if res.state.line != "" || res.echo != "" {
+		t.Fatalf("expected no line update while consuming escape sequence: %+v", res)
+	}
+
+	res = c.processInteractiveByte(res.state, 'z')
+	if res.state.line != "z" || res.echo != "z" {
+		t.Fatalf("expected printable char after escape sequence, got %+v", res)
+	}
+}
+
+func TestProcessInteractiveByteQuestionAndTab(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+	state := interactiveInputState{line: "sh"}
+
+	res := c.processInteractiveByte(state, '?')
+	if !res.shouldQuestion || !res.shouldRedraw {
+		t.Fatalf("expected question + redraw, got %+v", res)
+	}
+	if res.state.line != "sh" {
+		t.Fatalf("line=%q want=%q", res.state.line, "sh")
+	}
+
+	res = c.processInteractiveByte(state, '\t')
+	if !res.shouldRedraw {
+		t.Fatalf("expected redraw after tab completion, got %+v", res)
+	}
+	if res.state.line != "show " {
+		t.Fatalf("line=%q want=%q", res.state.line, "show ")
+	}
+}
+
+func TestProcessInteractiveByteControlAndEnter(t *testing.T) {
+	c := &CLI{mode: ModeExec}
+
+	res := c.processInteractiveByte(interactiveInputState{line: "abc"}, 3)
+	if res.state.line != "" || res.echo != "^C\r\n" || !res.shouldRedraw {
+		t.Fatalf("unexpected ctrl+c result: %+v", res)
+	}
+
+	res = c.processInteractiveByte(interactiveInputState{}, 4)
+	if !res.shouldQuit || res.echo != "\r\n" {
+		t.Fatalf("unexpected ctrl+d empty-line result: %+v", res)
+	}
+
+	res = c.processInteractiveByte(interactiveInputState{line: "x"}, 4)
+	if res.shouldQuit {
+		t.Fatalf("ctrl+d should not quit with buffered input: %+v", res)
+	}
+	if res.state.line != "x" {
+		t.Fatalf("line=%q want=%q", res.state.line, "x")
+	}
+
+	res = c.processInteractiveByte(interactiveInputState{line: "show version"}, '\r')
+	if !res.shouldExecute || res.executeLine != "show version" {
+		t.Fatalf("expected execute line result, got %+v", res)
+	}
+	if res.state.line != "" || res.echo != "\r\n" {
+		t.Fatalf("unexpected enter side effects: %+v", res)
+	}
+}
+
 func TestExecLineAcceptsAbbreviations(t *testing.T) {
 	c := &CLI{hostname: "switch", mode: ModeExec}
 
