@@ -59,6 +59,8 @@ type BackupDiffReport struct {
 	FieldChanges                []string
 	CredentialBlockChanged      bool
 	CredentialBlockChangedBytes int
+	PasswordSlotChanged         bool
+	PasswordSlotChangedBytes    int
 	BaseCredentialHex           string
 	CandidateCredentialHex      string
 }
@@ -126,8 +128,10 @@ func CompareBackupConfigs(base []byte, candidate []byte) (BackupDiffReport, erro
 		BaseCredentialHex:           hex.EncodeToString(baseDecoded.CredentialBlob),
 		CandidateCredentialHex:      hex.EncodeToString(candidateDecoded.CredentialBlob),
 		CredentialBlockChangedBytes: credentialDiffBytes(baseDecoded.CredentialBlob, candidateDecoded.CredentialBlob),
+		PasswordSlotChangedBytes:    regionDiffBytes(base, candidate, offsetObfuscatedPassword, obfuscatedPasswordLen),
 	}
 	report.CredentialBlockChanged = report.CredentialBlockChangedBytes > 0
+	report.PasswordSlotChanged = report.PasswordSlotChangedBytes > 0
 
 	runStart := -1
 	runLen := 0
@@ -167,6 +171,8 @@ func CompareBackupConfigs(base []byte, candidate []byte) (BackupDiffReport, erro
 	appendFieldChange(&report.FieldChanges, "VLAN name", baseDecoded.VLANName, candidateDecoded.VLANName)
 	if baseDecoded.CredentialInfo.RecoveredPassword != "" && candidateDecoded.CredentialInfo.RecoveredPassword != "" {
 		appendFieldChange(&report.FieldChanges, "Password (obfuscated@0x49)", baseDecoded.CredentialInfo.RecoveredPassword, candidateDecoded.CredentialInfo.RecoveredPassword)
+	} else if report.PasswordSlotChanged {
+		appendFieldChange(&report.FieldChanges, "Password slot bytes (obfuscated@0x49)", baseDecoded.CredentialInfo.ObfuscatedPasswordHex, candidateDecoded.CredentialInfo.ObfuscatedPasswordHex)
 	}
 
 	return report, nil
@@ -210,6 +216,7 @@ func FormatBackupDiff(report BackupDiffReport) string {
 	fmt.Fprintf(&b, "\nCredential block\n")
 	fmt.Fprintf(&b, "  Changed    : %s\n", ternary(report.CredentialBlockChanged, "yes", "no"))
 	fmt.Fprintf(&b, "  Delta      : %d bytes\n", report.CredentialBlockChangedBytes)
+	fmt.Fprintf(&b, "  Pw slot    : %s (%d bytes changed @0x%02x)\n", ternary(report.PasswordSlotChanged, "changed", "unchanged"), report.PasswordSlotChangedBytes, offsetObfuscatedPassword)
 	fmt.Fprintf(&b, "  Base       : %s\n", fallback(report.BaseCredentialHex, "(empty)"))
 	fmt.Fprintf(&b, "  Candidate  : %s\n", fallback(report.CandidateCredentialHex, "(empty)"))
 
@@ -319,6 +326,29 @@ func credentialDiffBytes(base []byte, candidate []byte) int {
 		}
 	}
 	return diff + absInt(len(base)-len(candidate))
+}
+
+func regionDiffBytes(base []byte, candidate []byte, offset int, length int) int {
+	if offset < 0 || length <= 0 {
+		return 0
+	}
+	diff := 0
+	for i := 0; i < length; i++ {
+		idx := offset + i
+		inBase := idx >= 0 && idx < len(base)
+		inCandidate := idx >= 0 && idx < len(candidate)
+		if !inBase && !inCandidate {
+			continue
+		}
+		if inBase != inCandidate {
+			diff++
+			continue
+		}
+		if base[idx] != candidate[idx] {
+			diff++
+		}
+	}
+	return diff
 }
 
 func absInt(v int) int {

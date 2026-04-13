@@ -71,6 +71,11 @@ type Client struct {
 	portCount  int
 }
 
+var loginErrTypePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\berrType\s*=\s*(\d+)`),
+	regexp.MustCompile(`\blogonInfo\s*=\s*new\s+Array\(\s*(\d+)`),
+}
+
 func NewClient(host string, opts ...Option) (*Client, error) {
 	if strings.TrimSpace(host) == "" {
 		return nil, fmt.Errorf("host must not be empty")
@@ -234,14 +239,9 @@ func (c *Client) Login() error {
 		return fmt.Errorf("login: %w", err)
 	}
 
-	if strings.Contains(string(body), "errType") {
-		m := regexp.MustCompile(`errType\s*=\s*(\d+)`).FindStringSubmatch(string(body))
-		if len(m) == 2 {
-			errType, _ := strconv.Atoi(m[1])
-			if errType != 0 {
-				return fmt.Errorf("login failed (errType=%d): check username and password", errType)
-			}
-		}
+	errType, ok := parseLoginErrType(string(body))
+	if ok && errType != 0 {
+		return fmt.Errorf("login failed (errType=%d): check username and password", errType)
 	}
 
 	if !c.hasSSIDCookie() {
@@ -261,6 +261,21 @@ func (c *Client) Login() error {
 		c.portCount = 8
 	}
 	return nil
+}
+
+func parseLoginErrType(body string) (int, bool) {
+	for _, pattern := range loginErrTypePatterns {
+		matches := pattern.FindStringSubmatch(body)
+		if len(matches) != 2 {
+			continue
+		}
+		errType, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+		return errType, true
+	}
+	return 0, false
 }
 
 func (c *Client) Logout() {

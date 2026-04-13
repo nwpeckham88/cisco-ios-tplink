@@ -57,6 +57,27 @@ func TestLoginFailureErrType(t *testing.T) {
 	}
 }
 
+func TestLoginFailureErrTypeFromLogonInfoArray(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/logon.cgi" {
+			fmt.Fprint(w, "<script>var logonInfo = new Array(1,0,0); var errType=logonInfo[0];</script>")
+			return
+		}
+		if r.URL.Path == "/PortSettingRpm.htm" {
+			fmt.Fprint(w, `<script>var max_port_num = 8;</script>`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	err := client.Login()
+	if err == nil {
+		t.Fatal("expected login failure")
+	}
+	if !strings.Contains(err.Error(), "errType=1") {
+		t.Fatalf("expected errType failure, got: %v", err)
+	}
+}
+
 func TestLoginNoCookieFails(t *testing.T) {
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/logon.cgi" {

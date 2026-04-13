@@ -304,4 +304,33 @@ func TestCompareBackupConfigsIncludesRecoveredPasswordFieldChange(t *testing.T) 
 	if !strings.Contains(joined, `Password (obfuscated@0x49): "testpass" -> "passtest"`) {
 		t.Fatalf("expected recovered password field change, got %q", joined)
 	}
+	if report.PasswordSlotChangedBytes != 6 {
+		t.Fatalf("PasswordSlotChangedBytes = %d, want 6", report.PasswordSlotChangedBytes)
+	}
+}
+
+func TestCompareBackupConfigsTracksPasswordSlotOutsideCredentialBlob(t *testing.T) {
+	base := buildSyntheticBackup()
+	candidate := buildSyntheticBackup()
+
+	// offset 0x4c is inside obfuscated password slot but outside 0x2c..0x4b blob
+	candidate[offsetObfuscatedPassword+3] = 's' ^ knownPasswordXORKey[3]
+
+	report, err := CompareBackupConfigs(base, candidate)
+	if err != nil {
+		t.Fatalf("CompareBackupConfigs() error = %v", err)
+	}
+	if report.CredentialBlockChangedBytes != 0 {
+		t.Fatalf("CredentialBlockChangedBytes = %d, want 0", report.CredentialBlockChangedBytes)
+	}
+	if !report.PasswordSlotChanged {
+		t.Fatal("PasswordSlotChanged = false, want true")
+	}
+	if report.PasswordSlotChangedBytes != 1 {
+		t.Fatalf("PasswordSlotChangedBytes = %d, want 1", report.PasswordSlotChangedBytes)
+	}
+	joined := strings.Join(report.FieldChanges, "\n")
+	if !strings.Contains(joined, `Password (obfuscated@0x49): "testpass" -> "tesspass"`) {
+		t.Fatalf("expected password field change from slot delta, got %q", joined)
+	}
 }
