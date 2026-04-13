@@ -84,3 +84,29 @@ func TestDecodeBackupModeHonorsSizeLimit(t *testing.T) {
 		t.Fatalf("expected size-limit error, got:\n%s", string(out))
 	}
 }
+
+func TestDecodeBackupModeFailsOnInvalidBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	invalid := filepath.Join(tmpDir, "invalid.cfg")
+	if err := os.WriteFile(invalid, []byte("not-a-backup"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", invalid, err)
+	}
+
+	out, err := runDecodeCLI(invalid)
+	if err == nil {
+		t.Fatalf("invalid backup should fail, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "failed to decode backup") {
+		t.Fatalf("expected decode error, got:\n%s", string(out))
+	}
+}
+
+func TestDecodeBackupModeFailsOnMissingFile(t *testing.T) {
+	out, err := runDecodeCLI(filepath.Join(t.TempDir(), "missing.cfg"))
+	if err == nil {
+		t.Fatalf("missing file should fail, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "failed to read backup file") {
+		t.Fatalf("expected read error, got:\n%s", string(out))
+	}
+}

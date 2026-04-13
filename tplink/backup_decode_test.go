@@ -120,3 +120,28 @@ func TestAnalyzeCredentialBlobDeduplicatesMatches(t *testing.T) {
 		t.Fatalf("expected deduplicated matches, got %v", report.CandidateMatches)
 	}
 }
+
+func TestFormatDecodedBackupIncludesCoreFields(t *testing.T) {
+	decoded, err := DecodeBackupConfig(buildSyntheticBackup())
+	if err != nil {
+		t.Fatalf("DecodeBackupConfig() error = %v", err)
+	}
+
+	output := FormatDecodedBackup(decoded)
+	checks := []string{
+		"Backup Decode (best-effort)",
+		"Hostname   : TPLINK-DIST-SWITCH",
+		"IP         : 192.168.3.49",
+		"Netmask    : 255.255.254.0",
+		"Gateway    : 192.168.2.1",
+		"DHCP       : enabled",
+		"VLAN name  : Default",
+		"Credential Block (offset 0x2c, 32 bytes)",
+		"Matches    : none against default credential candidates",
+	}
+	for _, check := range checks {
+		if !strings.Contains(output, check) {
+			t.Fatalf("expected output to contain %q\n%s", check, output)
+		}
+	}
+}
