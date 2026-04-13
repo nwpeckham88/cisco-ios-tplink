@@ -25,12 +25,19 @@ func buildDecodeFixture(size int) []byte {
 		0x13, 0xbe, 0xb0, 0xb2, 0xfb, 0x6b, 0x06, 0xc3,
 		0x14, 0x95, 0x7e, 0x95, 0x00, 0x28, 0x11, 0x19,
 	})
+	copy(data[0x4c:0x51], []byte{0x70, 0x0d, 0xdf, 0xc3, 0xc1})
 	copy(data[0x4a6:], []byte("Default\x00"))
 	return data
 }
 
 func runDecodeCLI(path string) ([]byte, error) {
 	cmd := exec.Command("go", "run", ".", "--decode-backup", path)
+	cmd.Dir = "."
+	return cmd.CombinedOutput()
+}
+
+func runDiffCLI(basePath string, candidatePath string) ([]byte, error) {
+	cmd := exec.Command("go", "run", ".", "--diff-backup-base", basePath, "--diff-backup-candidate", candidatePath)
 	cmd.Dir = "."
 	return cmd.CombinedOutput()
 }
@@ -108,5 +115,85 @@ func TestDecodeBackupModeFailsOnMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "failed to read backup file") {
 		t.Fatalf("expected read error, got:\n%s", string(out))
+	}
+}
+
+func TestDiffBackupModeIsHostless(t *testing.T) {
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "base.cfg")
+	candidatePath := filepath.Join(tmpDir, "candidate.cfg")
+
+	base := buildDecodeFixture(2258)
+	candidate := buildDecodeFixture(2258)
+	copy(candidate[5:9], []byte{10, 0, 0, 42})
+
+	if err := os.WriteFile(basePath, base, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", basePath, err)
+	}
+	if err := os.WriteFile(candidatePath, candidate, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", candidatePath, err)
+	}
+
+	out, err := runDiffCLI(basePath, candidatePath)
+	if err != nil {
+		t.Fatalf("diff mode failed: %v\n%s", err, string(out))
+	}
+
+	text := string(out)
+	if !strings.Contains(text, "Backup Diff") {
+		t.Fatalf("expected diff output, got:\n%s", text)
+	}
+	if strings.Contains(text, "Connecting to") {
+		t.Fatalf("diff mode should not attempt network login, got:\n%s", text)
+	}
+}
+
+func TestDiffBackupModeRequiresBothFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "base.cfg")
+	if err := os.WriteFile(basePath, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", basePath, err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "--diff-backup-base", basePath)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected missing diff args to fail, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "must be provided together") {
+		t.Fatalf("expected paired-flag error, got:\n%s", string(out))
+	}
+}
+
+func TestDecodeAndDiffModesConflict(t *testing.T) {
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "base.cfg")
+	candidatePath := filepath.Join(tmpDir, "candidate.cfg")
+	if err := os.WriteFile(basePath, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", basePath, err)
+	}
+	if err := os.WriteFile(candidatePath, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", candidatePath, err)
+	}
+
+	cmd := exec.Command(
+		"go",
+		"run",
+		".",
+		"--decode-backup",
+		basePath,
+		"--diff-backup-base",
+		basePath,
+		"--diff-backup-candidate",
+		candidatePath,
+	)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected conflicting modes to fail, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "mutually exclusive") {
+		t.Fatalf("expected mutually-exclusive mode error, got:\n%s", string(out))
 	}
 }

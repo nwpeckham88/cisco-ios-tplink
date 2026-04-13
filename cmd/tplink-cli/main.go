@@ -14,7 +14,24 @@ import (
 const maxDecodeBackupSize = 2 << 20
 
 func usageText() string {
-	return "usage: tplink-cli <host> [--user USER] [--password PASSWORD] [--config-file FILE] | tplink-cli --decode-backup FILE"
+	return "usage: tplink-cli <host> [--user USER] [--password PASSWORD] [--config-file FILE] | tplink-cli --decode-backup FILE | tplink-cli --diff-backup-base FILE --diff-backup-candidate FILE"
+}
+
+func readBackupFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read backup file %q: %w", path, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxDecodeBackupSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read backup file %q: %w", path, err)
+	}
+	if len(data) > maxDecodeBackupSize {
+		return nil, fmt.Errorf("backup file %q exceeds max decode size (%d bytes)", path, maxDecodeBackupSize)
+	}
+	return data, nil
 }
 
 func main() {
@@ -25,6 +42,8 @@ func main() {
 	var passwordEnv string
 	var configFile string
 	var decodeBackupFile string
+	var diffBackupBase string
+	var diffBackupCandidate string
 	var host string
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -37,6 +56,8 @@ func main() {
 	fs.StringVar(&passwordEnv, "password-env", "TPLINK_PASSWORD", "Environment variable for password")
 	fs.StringVar(&configFile, "config-file", "", "Run commands from file and exit")
 	fs.StringVar(&decodeBackupFile, "decode-backup", "", "Decode a binary TP-Link backup file and exit")
+	fs.StringVar(&diffBackupBase, "diff-backup-base", "", "Base backup file for byte/field diff")
+	fs.StringVar(&diffBackupCandidate, "diff-backup-candidate", "", "Candidate backup file for byte/field diff")
 
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -47,21 +68,15 @@ func main() {
 		os.Exit(2)
 	}
 
-	if decodeBackupFile != "" {
-		f, err := os.Open(decodeBackupFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read backup file %q: %v\n", decodeBackupFile, err)
-			os.Exit(1)
-		}
-		defer f.Close()
+	if decodeBackupFile != "" && (diffBackupBase != "" || diffBackupCandidate != "") {
+		fmt.Fprintln(os.Stderr, "--decode-backup is mutually exclusive with --diff-backup-base/--diff-backup-candidate")
+		os.Exit(2)
+	}
 
-		data, err := io.ReadAll(io.LimitReader(f, maxDecodeBackupSize+1))
+	if decodeBackupFile != "" {
+		data, err := readBackupFile(decodeBackupFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read backup file %q: %v\n", decodeBackupFile, err)
-			os.Exit(1)
-		}
-		if len(data) > maxDecodeBackupSize {
-			fmt.Fprintf(os.Stderr, "backup file %q exceeds max decode size (%d bytes)\n", decodeBackupFile, maxDecodeBackupSize)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		decoded, err := tplink.DecodeBackupConfig(data)
@@ -70,6 +85,31 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(tplink.FormatDecodedBackup(decoded))
+		return
+	}
+
+	if (diffBackupBase == "") != (diffBackupCandidate == "") {
+		fmt.Fprintln(os.Stderr, "--diff-backup-base and --diff-backup-candidate must be provided together")
+		os.Exit(2)
+	}
+	if diffBackupBase != "" {
+		baseData, err := readBackupFile(diffBackupBase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		candidateData, err := readBackupFile(diffBackupCandidate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+
+		report, err := tplink.CompareBackupConfigs(baseData, candidateData)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to diff backups %q and %q: %v\n", diffBackupBase, diffBackupCandidate, err)
+			os.Exit(1)
+		}
+		fmt.Print(tplink.FormatBackupDiff(report))
 		return
 	}
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,6 +31,7 @@ func buildSyntheticBackup() []byte {
 		0x13, 0xbe, 0xb0, 0xb2, 0xfb, 0x6b, 0x06, 0xc3,
 		0x14, 0x95, 0x7e, 0x95, 0x00, 0x28, 0x11, 0x19,
 	})
+	copy(data[0x4c:0x51], []byte{0x70, 0x0d, 0xdf, 0xc3, 0xc1})
 
 	return data
 }
@@ -137,11 +140,168 @@ func TestFormatDecodedBackupIncludesCoreFields(t *testing.T) {
 		"DHCP       : enabled",
 		"VLAN name  : Default",
 		"Credential Block (offset 0x2c, 32 bytes)",
+		"Password   : testpass",
 		"Matches    : none against default credential candidates",
 	}
 	for _, check := range checks {
 		if !strings.Contains(output, check) {
 			t.Fatalf("expected output to contain %q\n%s", check, output)
 		}
+	}
+}
+
+func TestDecodeBackupConfigRecoversPasswordFromKnownObfuscation(t *testing.T) {
+	decoded, err := DecodeBackupConfig(buildSyntheticBackup())
+	if err != nil {
+		t.Fatalf("DecodeBackupConfig() error = %v", err)
+	}
+
+	if decoded.CredentialInfo.RecoveredPassword != FirmwarePassword {
+		t.Fatalf("RecoveredPassword = %q, want %q", decoded.CredentialInfo.RecoveredPassword, FirmwarePassword)
+	}
+	if decoded.CredentialInfo.ObfuscatedPasswordHex != "281119700ddfc3c1" {
+		t.Fatalf("ObfuscatedPasswordHex = %q", decoded.CredentialInfo.ObfuscatedPasswordHex)
+	}
+}
+
+func TestDecodeBackupConfigRecoversNullPaddedShortPassword(t *testing.T) {
+	data := buildSyntheticBackup()
+	for i := 0; i < obfuscatedPasswordLen; i++ {
+		data[offsetObfuscatedPassword+i] = knownPasswordXORKey[i]
+	}
+	short := []byte("secret")
+	for i := 0; i < len(short); i++ {
+		data[offsetObfuscatedPassword+i] = short[i] ^ knownPasswordXORKey[i]
+	}
+
+	decoded, err := DecodeBackupConfig(data)
+	if err != nil {
+		t.Fatalf("DecodeBackupConfig() error = %v", err)
+	}
+	if decoded.CredentialInfo.RecoveredPassword != "secret" {
+		t.Fatalf("RecoveredPassword = %q, want %q", decoded.CredentialInfo.RecoveredPassword, "secret")
+	}
+}
+
+func TestCompareBackupConfigsDetectsFieldAndCredentialChanges(t *testing.T) {
+	base := buildSyntheticBackup()
+	modified := buildSyntheticBackup()
+
+	copy(modified[5:9], []byte{10, 0, 0, 42})
+	modified[0x2c] ^= 0xff
+
+	report, err := CompareBackupConfigs(base, modified)
+	if err != nil {
+		t.Fatalf("CompareBackupConfigs() error = %v", err)
+	}
+
+	if report.ChangedByteCount != 5 {
+		t.Fatalf("ChangedByteCount = %d, want 5", report.ChangedByteCount)
+	}
+	if !report.CredentialBlockChanged {
+		t.Fatal("CredentialBlockChanged = false, want true")
+	}
+	if report.CredentialBlockChangedBytes != 1 {
+		t.Fatalf("CredentialBlockChangedBytes = %d, want 1", report.CredentialBlockChangedBytes)
+	}
+
+	joinedFields := strings.Join(report.FieldChanges, "\n")
+	if !strings.Contains(joinedFields, "IP") {
+		t.Fatalf("expected IP in field changes, got %q", joinedFields)
+	}
+}
+
+func TestFormatBackupDiffIncludesSummaryAndRuns(t *testing.T) {
+	base := buildSyntheticBackup()
+	modified := buildSyntheticBackup()
+
+	modified[5] = 172
+	modified[6] = 16
+	modified[7] = 8
+	modified[8] = 99
+
+	report, err := CompareBackupConfigs(base, modified)
+	if err != nil {
+		t.Fatalf("CompareBackupConfigs() error = %v", err)
+	}
+
+	output := FormatBackupDiff(report)
+	checks := []string{
+		"Backup Diff (best-effort)",
+		"Compared   :",
+		"Changed    :",
+		"Runs       :",
+		"Field changes",
+		"IP",
+	}
+	for _, check := range checks {
+		if !strings.Contains(output, check) {
+			t.Fatalf("expected output to contain %q\n%s", check, output)
+		}
+	}
+}
+
+func TestFormatDecodedBackupIncludesCredentialPolicyContext(t *testing.T) {
+	decoded, err := DecodeBackupConfig(buildSyntheticBackup())
+	if err != nil {
+		t.Fatalf("DecodeBackupConfig() error = %v", err)
+	}
+	output := FormatDecodedBackup(decoded)
+	checks := []string{
+		"Policy     : username 1-16 [A-Za-z0-9_], password 6-16 [A-Za-z0-9_]",
+		"Coverage   : password decode currently mapped to 8-byte obfuscated slot at 0x49",
+	}
+	for _, check := range checks {
+		if !strings.Contains(output, check) {
+			t.Fatalf("expected output to contain %q\n%s", check, output)
+		}
+	}
+}
+
+func TestFormatBackupDiffPercentageNotOverHundredOnSizeDelta(t *testing.T) {
+	base := buildSyntheticBackup()
+	candidate := buildSyntheticBackup()
+
+	for i := 4; i < len(candidate); i++ {
+		candidate[i] ^= 0xff
+	}
+	candidate = append(candidate, 0xaa, 0xbb, 0xcc, 0xdd)
+
+	report, err := CompareBackupConfigs(base, candidate)
+	if err != nil {
+		t.Fatalf("CompareBackupConfigs() error = %v", err)
+	}
+
+	output := FormatBackupDiff(report)
+	re := regexp.MustCompile(`Changed\s+:\s+\d+ bytes \(([0-9]+\.[0-9]+)%\)`)
+	m := re.FindStringSubmatch(output)
+	if len(m) != 2 {
+		t.Fatalf("could not parse changed percent from output:\n%s", output)
+	}
+	pct, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatalf("ParseFloat(%q): %v", m[1], err)
+	}
+	if pct > 100.0 {
+		t.Fatalf("changed percent = %.2f, want <= 100.0", pct)
+	}
+}
+
+func TestCompareBackupConfigsIncludesRecoveredPasswordFieldChange(t *testing.T) {
+	base := buildSyntheticBackup()
+	candidate := buildSyntheticBackup()
+
+	for i, ch := range []byte("passtest") {
+		candidate[offsetObfuscatedPassword+i] = ch ^ knownPasswordXORKey[i]
+	}
+
+	report, err := CompareBackupConfigs(base, candidate)
+	if err != nil {
+		t.Fatalf("CompareBackupConfigs() error = %v", err)
+	}
+
+	joined := strings.Join(report.FieldChanges, "\n")
+	if !strings.Contains(joined, `Password (obfuscated@0x49): "testpass" -> "passtest"`) {
+		t.Fatalf("expected recovered password field change, got %q", joined)
 	}
 }
