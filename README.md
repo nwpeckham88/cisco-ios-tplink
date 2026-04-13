@@ -16,6 +16,29 @@ This folder contains a Go rewrite of the TL-SG108E SDK and CLI.
 go build ./...
 ```
 
+## Build release tarball
+
+Create a release directory plus tar.gz package:
+
+```bash
+chmod +x scripts/build-release.sh
+scripts/build-release.sh
+```
+
+This outputs artifacts under `dist/releases/`:
+
+- `dist/releases/tplink-cli-<version>-<goos>-<goarch>/`
+- `dist/releases/tplink-cli-<version>-<goos>-<goarch>.tar.gz`
+- `dist/releases/tplink-cli-<version>-<goos>-<goarch>.tar.gz.sha256` (when checksum tool is available)
+
+Cross-build example:
+
+```bash
+scripts/build-release.sh --goos linux --goarch arm64 --version v1.2.3
+```
+
+For GitHub releases, see `.github/workflows/release.yml`, which calls the same script and uploads artifacts on `v*` tags.
+
 ## Run CLI
 
 ```bash
