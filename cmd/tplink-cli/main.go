@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/nwpeckham88/cisco-ios-tplink/tplink"
 )
@@ -14,7 +15,7 @@ import (
 const maxDecodeBackupSize = 2 << 20
 
 func usageText() string {
-	return "usage: tplink-cli <host> [--user USER] [--password PASSWORD] [--config-file FILE] | tplink-cli --decode-backup FILE | tplink-cli --diff-backup-base FILE --diff-backup-candidate FILE"
+	return "usage: tplink-cli <host> [--user USER] [--password PASSWORD] [--config-file FILE] | tplink-cli --scan-cidr CIDR [--scan-port PORT --scan-timeout DURATION --scan-workers N --scan-max-hosts N] | tplink-cli --decode-backup FILE | tplink-cli --diff-backup-base FILE --diff-backup-candidate FILE"
 }
 
 func readBackupFile(path string) ([]byte, error) {
@@ -44,6 +45,12 @@ func main() {
 	var decodeBackupFile string
 	var diffBackupBase string
 	var diffBackupCandidate string
+	var scanCIDR string
+	var scanPort int
+	var scanTimeout time.Duration
+	var scanWorkers int
+	var scanMaxHosts int
+	var scanVerbose bool
 	var host string
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -58,6 +65,12 @@ func main() {
 	fs.StringVar(&decodeBackupFile, "decode-backup", "", "Decode a binary TP-Link backup file and exit")
 	fs.StringVar(&diffBackupBase, "diff-backup-base", "", "Base backup file for byte/field diff")
 	fs.StringVar(&diffBackupCandidate, "diff-backup-candidate", "", "Candidate backup file for byte/field diff")
+	fs.StringVar(&scanCIDR, "scan-cidr", "", "Scan an IPv4 CIDR for reachable switches and exit")
+	fs.IntVar(&scanPort, "scan-port", 80, "Management HTTP port to probe during scan")
+	fs.DurationVar(&scanTimeout, "scan-timeout", 1500*time.Millisecond, "Per-host scan timeout")
+	fs.IntVar(&scanWorkers, "scan-workers", 16, "Number of concurrent scan workers")
+	fs.IntVar(&scanMaxHosts, "scan-max-hosts", 1024, "Maximum hosts to probe from CIDR")
+	fs.BoolVar(&scanVerbose, "scan-verbose", false, "Print failed probe errors during scan")
 
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -70,6 +83,10 @@ func main() {
 
 	if decodeBackupFile != "" && (diffBackupBase != "" || diffBackupCandidate != "") {
 		fmt.Fprintln(os.Stderr, "--decode-backup is mutually exclusive with --diff-backup-base/--diff-backup-candidate")
+		os.Exit(2)
+	}
+	if scanCIDR != "" && (decodeBackupFile != "" || diffBackupBase != "" || diffBackupCandidate != "") {
+		fmt.Fprintln(os.Stderr, "--scan-cidr is mutually exclusive with backup decode/diff modes")
 		os.Exit(2)
 	}
 
@@ -110,6 +127,65 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(tplink.FormatBackupDiff(report))
+		return
+	}
+
+	if scanCIDR != "" {
+		if host != "" {
+			fmt.Fprintln(os.Stderr, "--scan-cidr is hostless and cannot be used with a positional host")
+			os.Exit(2)
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintln(os.Stderr, "--scan-cidr is hostless and cannot be used with positional arguments")
+			os.Exit(2)
+		}
+		if configFile != "" {
+			fmt.Fprintln(os.Stderr, "--scan-cidr cannot be combined with --config-file")
+			os.Exit(2)
+		}
+
+		resolvedPassword, err := tplink.ResolvePassword(password, passwordStdin, passwordFile, passwordEnv)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(2)
+		}
+
+		report, err := tplink.ScanNetwork(tplink.ScanOptions{
+			CIDR:     scanCIDR,
+			Port:     scanPort,
+			Timeout:  scanTimeout,
+			Workers:  scanWorkers,
+			MaxHosts: scanMaxHosts,
+			Username: user,
+			Password: resolvedPassword,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scan failed: %v\n", err)
+			os.Exit(2)
+		}
+
+		successes := report.Successful()
+		fmt.Printf("Scan Results for %s\n", scanCIDR)
+		if report.Truncated {
+			fmt.Printf("  Note: host range exceeded --scan-max-hosts; scanning first %d hosts only.\n", report.ScannedHosts)
+		}
+		if len(successes) == 0 {
+			fmt.Println("  No reachable switches found.")
+		} else {
+			for _, result := range successes {
+				fmt.Printf("  %s  |  %s  |  FW: %s  |  IP: %s\n", result.Host, result.Info.Description, result.Info.Firmware, result.Info.IP)
+			}
+		}
+
+		if scanVerbose {
+			for _, result := range report.Results {
+				if result.Err != nil {
+					fmt.Printf("  %s  |  ERROR: %v\n", result.Host, result.Err)
+				}
+			}
+		}
+
+		fmt.Printf("\nScanned %d host(s); found %d switch(es).\n", report.ScannedHosts, len(successes))
 		return
 	}
 
