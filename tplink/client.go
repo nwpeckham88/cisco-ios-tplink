@@ -264,6 +264,7 @@ func (c *Client) Login() error {
 }
 
 func parseLoginErrType(body string) (int, bool) {
+	found := false
 	for _, pattern := range loginErrTypePatterns {
 		matches := pattern.FindStringSubmatch(body)
 		if len(matches) != 2 {
@@ -273,9 +274,12 @@ func parseLoginErrType(body string) (int, bool) {
 		if err != nil {
 			continue
 		}
-		return errType, true
+		found = true
+		if errType != 0 {
+			return errType, true
+		}
 	}
-	return 0, false
+	return 0, found
 }
 
 func (c *Client) Logout() {
