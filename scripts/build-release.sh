@@ -107,15 +107,29 @@ if [ "$GOOS_VALUE" = "windows" ]; then
   BIN_FILE="${BINARY_NAME}.exe"
 fi
 
-PACKAGE_BASE="${BINARY_NAME}-${VERSION_VALUE}-${GOOS_VALUE}-${GOARCH_VALUE}"
+PACKAGE_BASE="${BINARY_NAME}-${GOOS_VALUE}-${GOARCH_VALUE}"
 STAGE_DIR="${OUTPUT_DIR}/${PACKAGE_BASE}"
 TAR_PATH="${OUTPUT_DIR}/${PACKAGE_BASE}.tar.gz"
+
+mkdir -p "$OUTPUT_DIR"
+
+# Keep output tidy: each run produces one canonical target directory,
+# one tarball, and one checksum for this binary name.
+find "$OUTPUT_DIR" -maxdepth 1 -mindepth 1 -name "${BINARY_NAME}-*" -exec rm -rf {} +
 
 mkdir -p "$STAGE_DIR"
 
 echo "Building ${BINARY_NAME} for ${GOOS_VALUE}/${GOARCH_VALUE}..."
 CGO_ENABLED=0 GOOS="$GOOS_VALUE" GOARCH="$GOARCH_VALUE" \
   go build -trimpath -o "${STAGE_DIR}/${BIN_FILE}" ./cmd/tplink-cli
+
+if [ -f "README.md" ]; then
+  cp "README.md" "${STAGE_DIR}/README.md"
+fi
+if [ -f "LICENSE" ]; then
+  cp "LICENSE" "${STAGE_DIR}/LICENSE"
+fi
+printf '%s\n' "${VERSION_VALUE}" > "${STAGE_DIR}/VERSION"
 
 echo "Packing ${TAR_PATH}..."
 tar -C "$OUTPUT_DIR" -czf "$TAR_PATH" "$PACKAGE_BASE"

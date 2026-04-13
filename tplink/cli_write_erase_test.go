@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func newWriteEraseCLI(t *testing.T) (*CLI, *atomic.Int32) {
@@ -235,5 +237,48 @@ func TestCopyShortFilenameNotTreatedAsAlias(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "no such") {
 		t.Fatalf("expected file read error, got: %v", err)
+	}
+}
+
+func TestCopyRestoreShowsBackupPreviewAndDate(t *testing.T) {
+	c, _ := newWriteEraseCLI(t)
+
+	backupFile := filepath.Join(t.TempDir(), "config.cfg")
+	if err := os.WriteFile(backupFile, buildSyntheticBackup(), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	expectedDate := time.Date(2026, time.April, 12, 9, 30, 0, 0, time.Local)
+	if err := os.Chtimes(backupFile, expectedDate, expectedDate); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "n\n", func() {
+			quit, err := c.cmdCopy(fmt.Sprintf("%s running-config", backupFile))
+			if err != nil {
+				t.Fatalf("cmdCopy(<file> running-config): %v", err)
+			}
+			if quit {
+				t.Fatal("expected cancelled restore to keep session open")
+			}
+		})
+	})
+
+	checks := []string{
+		"Backup preview from",
+		"Backup date",
+		formatBackupDate(expectedDate),
+		"Hostname    : TPLINK-DIST-SWITCH",
+		"IP          : 192.168.3.49",
+		"Netmask     : 255.255.254.0",
+		"Gateway     : 192.168.2.1",
+		"DHCP        : enabled",
+		"Restore from",
+		"Cancelled",
+	}
+	for _, check := range checks {
+		if !strings.Contains(out, check) {
+			t.Fatalf("missing %q in output: %q", check, out)
+		}
 	}
 }

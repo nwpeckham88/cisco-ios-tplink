@@ -27,9 +27,12 @@ scripts/build-release.sh
 
 This outputs artifacts under `dist/releases/`:
 
-- `dist/releases/tplink-cli-<version>-<goos>-<goarch>/`
-- `dist/releases/tplink-cli-<version>-<goos>-<goarch>.tar.gz`
-- `dist/releases/tplink-cli-<version>-<goos>-<goarch>.tar.gz.sha256` (when checksum tool is available)
+- `dist/releases/tplink-cli-<goos>-<goarch>/`
+- `dist/releases/tplink-cli-<goos>-<goarch>.tar.gz`
+- `dist/releases/tplink-cli-<goos>-<goarch>.tar.gz.sha256` (when checksum tool is available)
+
+The target folder contains the binary plus `README.md`, `LICENSE`, and `VERSION`.
+Each run replaces previous `tplink-cli-*` artifacts so `dist/releases/` stays tidy.
 
 Cross-build example:
 

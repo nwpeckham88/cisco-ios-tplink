@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -1390,6 +1391,7 @@ func (c *CLI) cmdCopy(args string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		c.printBackupPreview(filename, data)
 		if !confirm(fmt.Sprintf("  Restore from %q? This will reboot the switch. [y/N] ", filename)) {
 			fmt.Println("  Cancelled")
 			return false, nil
@@ -1401,6 +1403,32 @@ func (c *CLI) cmdCopy(args string) (bool, error) {
 		return true, nil
 	}
 	return false, errors.New(usage)
+}
+
+func (c *CLI) printBackupPreview(filename string, data []byte) {
+	fmt.Printf("  Backup preview from %q\n", filename)
+	if info, err := os.Stat(filename); err == nil {
+		fmt.Printf("  Backup date : %s\n", formatBackupDate(info.ModTime()))
+	}
+
+	decoded, err := DecodeBackupConfig(data)
+	if err != nil {
+		fmt.Printf("  Backup decode: unavailable (%v)\n", err)
+		return
+	}
+
+	fmt.Printf("  Hostname    : %s\n", fallback(decoded.Hostname, "(empty)"))
+	fmt.Printf("  IP          : %s\n", decoded.IP)
+	fmt.Printf("  Netmask     : %s\n", decoded.Netmask)
+	fmt.Printf("  Gateway     : %s\n", decoded.Gateway)
+	fmt.Printf("  DHCP        : %s\n", ternary(decoded.DHCPEnabled, "enabled", "disabled"))
+}
+
+func formatBackupDate(value time.Time) string {
+	if value.IsZero() {
+		return "(unknown)"
+	}
+	return value.Local().Format("2006-01-02 15:04:05 -0700")
 }
 
 func (c *CLI) cmdWrite(args string) (bool, error) {
