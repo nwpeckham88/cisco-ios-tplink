@@ -78,12 +78,40 @@ func TestCompletionCandidates(t *testing.T) {
 		t.Fatalf("show completion got=%v", got)
 	}
 
-	if got := c.completionCandidates(ModeExec, false, []string{"show", "interfaces"}, ""); !reflect.DeepEqual(got, []string{"brief", "counters", "port"}) {
+	if got := c.completionCandidates(ModeExec, false, []string{"show", "interfaces"}, ""); !reflect.DeepEqual(got, []string{"brief", "counters", "port", "status"}) {
 		t.Fatalf("show interfaces completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeExec, false, []string{"show"}, "st"); !reflect.DeepEqual(got, []string{"startup-config"}) {
+		t.Fatalf("show startup-config completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeExec, false, []string{"erase"}, "st"); !reflect.DeepEqual(got, []string{"startup-config"}) {
+		t.Fatalf("erase startup-config completion got=%v", got)
 	}
 
 	if got := c.completionCandidates(ModeConfig, true, nil, "sp"); !reflect.DeepEqual(got, []string{"spanning-tree"}) {
 		t.Fatalf("no-form completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeConfigIF, false, []string{"switchport", "mode"}, ""); !reflect.DeepEqual(got, []string{"access", "trunk"}) {
+		t.Fatalf("switchport mode completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeConfigIF, false, []string{"switchport", "access"}, ""); !reflect.DeepEqual(got, []string{"vlan"}) {
+		t.Fatalf("switchport access completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeConfigIF, false, []string{"switchport", "trunk"}, ""); !reflect.DeepEqual(got, []string{"add", "allowed", "remove", "vlan"}) {
+		t.Fatalf("switchport trunk completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeConfigIF, false, []string{"switchport", "trunk", "allowed"}, ""); !reflect.DeepEqual(got, []string{"add", "remove", "vlan"}) {
+		t.Fatalf("switchport trunk allowed completion got=%v", got)
+	}
+
+	if got := c.completionCandidates(ModeConfigIF, false, []string{"switchport", "trunk", "allowed", "vlan"}, ""); !reflect.DeepEqual(got, []string{"add", "remove"}) {
+		t.Fatalf("switchport trunk allowed vlan completion got=%v", got)
 	}
 
 	if got := c.completionCandidates(ModeExec, false, []string{"configure", "terminal"}, ""); got != nil {
@@ -359,6 +387,9 @@ func TestShowAmbiguousSubcommand(t *testing.T) {
 	if err := c.cmdShow("v"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "ambiguous") {
 		t.Fatalf("expected ambiguous show subcommand error, got %v", err)
 	}
+	if err := c.cmdShow("s"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "ambiguous") {
+		t.Fatalf("expected ambiguous show subcommand error for 's', got %v", err)
+	}
 }
 
 func TestCmdHelpIsModeAwareAndCurrent(t *testing.T) {
@@ -432,6 +463,40 @@ func TestHandleQuestionRejectsMidLineQuestionMark(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "place ? at the end") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleQuestionUsesCRLFFormatting(t *testing.T) {
+	c := &CLI{mode: ModeConfigIF}
+	out := captureStdout(t, func() {
+		handled, err := c.handleQuestionWithNewline("switchport mode ?", "\r\n")
+		if !handled || err != nil {
+			t.Fatalf("expected handled nil error, got handled=%v err=%v", handled, err)
+		}
+	})
+
+	if !strings.Contains(out, "\r\n  access\r\n") {
+		t.Fatalf("expected CRLF formatted completion lines, got: %q", out)
+	}
+	if !strings.Contains(out, "\r\n  trunk\r\n") {
+		t.Fatalf("expected switchport mode completion options, got: %q", out)
+	}
+}
+
+func TestHandleQuestionDefaultUsesLFFormatting(t *testing.T) {
+	c := &CLI{mode: ModeConfigIF}
+	out := captureStdout(t, func() {
+		handled, err := c.handleQuestion("switchport mode ?")
+		if !handled || err != nil {
+			t.Fatalf("expected handled nil error, got handled=%v err=%v", handled, err)
+		}
+	})
+
+	if strings.Contains(out, "\r\n") {
+		t.Fatalf("default question output should use LF formatting, got: %q", out)
+	}
+	if !strings.Contains(out, "\n  access\n") {
+		t.Fatalf("expected LF-formatted completion lines, got: %q", out)
 	}
 }
 

@@ -142,3 +142,98 @@ func TestWriteEraseShowsIPAddress(t *testing.T) {
 		t.Fatalf("missing expected IP value in output: %q", out)
 	}
 }
+
+func TestWriteMemoryAlias(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		quit, err := c.cmdWrite("memory")
+		if err != nil {
+			t.Fatalf("cmdWrite(memory): %v", err)
+		}
+		if quit {
+			t.Fatal("expected write memory to keep session open")
+		}
+	})
+
+	if resetCalls.Load() != 0 {
+		t.Fatalf("write memory should not trigger reset, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "Building configuration") || !strings.Contains(out, "[OK]") {
+		t.Fatalf("missing IOS-style save output: %q", out)
+	}
+}
+
+func TestEraseStartupConfigAlias(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		withStdinInput(t, "RESET\n", func() {
+			quit, err := c.cmdErase("startup-config")
+			if err != nil {
+				t.Fatalf("cmdErase(startup-config): %v", err)
+			}
+			if !quit {
+				t.Fatal("expected erase startup-config to exit after reset")
+			}
+		})
+	})
+
+	if resetCalls.Load() != 1 {
+		t.Fatalf("erase startup-config should call FactoryReset once, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "Type RESET to confirm") {
+		t.Fatalf("missing destructive confirmation prompt: %q", out)
+	}
+}
+
+func TestCopyRunningStartupAlias(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		quit, err := c.cmdCopy("running-config startup-config")
+		if err != nil {
+			t.Fatalf("cmdCopy(running-config startup-config): %v", err)
+		}
+		if quit {
+			t.Fatal("expected copy running-config startup-config to keep session open")
+		}
+	})
+
+	if resetCalls.Load() != 0 {
+		t.Fatalf("copy running-config startup-config should not trigger reset, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "Building configuration") || !strings.Contains(out, "[OK]") {
+		t.Fatalf("missing IOS-style save output: %q", out)
+	}
+}
+
+func TestExecLineWriteMemoryAbbreviation(t *testing.T) {
+	c, _ := newWriteEraseCLI(t)
+
+	out := captureStdout(t, func() {
+		quit, err := c.execLine("wr mem")
+		if err != nil {
+			t.Fatalf("execLine(wr mem): %v", err)
+		}
+		if quit {
+			t.Fatal("expected wr mem to keep session open")
+		}
+	})
+
+	if !strings.Contains(out, "Building configuration") || !strings.Contains(out, "[OK]") {
+		t.Fatalf("missing IOS-style save output: %q", out)
+	}
+}
+
+func TestCopyShortFilenameNotTreatedAsAlias(t *testing.T) {
+	c, _ := newWriteEraseCLI(t)
+
+	_, err := c.cmdCopy("run running-config")
+	if err == nil {
+		t.Fatal("expected missing source file error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "no such") {
+		t.Fatalf("expected file read error, got: %v", err)
+	}
+}

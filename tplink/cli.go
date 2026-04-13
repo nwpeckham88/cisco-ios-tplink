@@ -60,9 +60,12 @@ func (c *CLI) prompt() string {
 	case ModeConfig:
 		return fmt.Sprintf("%s(config)# ", c.hostname)
 	case ModeConfigIF:
-		return fmt.Sprintf("%s(config-if-%s)# ", c.hostname, portRangeString(c.ifPorts))
+		if len(c.ifPorts) > 1 {
+			return fmt.Sprintf("%s(config-if-range)# ", c.hostname)
+		}
+		return fmt.Sprintf("%s(config-if)# ", c.hostname)
 	case ModeConfigVLAN:
-		return fmt.Sprintf("%s(config-vlan-%d)# ", c.hostname, c.vlanID)
+		return fmt.Sprintf("%s(config-vlan)# ", c.hostname)
 	default:
 		return fmt.Sprintf("%s# ", c.hostname)
 	}
@@ -128,9 +131,9 @@ func (c *CLI) runInteractiveTTY(stdinFD int) error {
 		}
 
 		if result.shouldQuestion {
-			_, qErr := c.handleQuestion(state.line + "?")
+			_, qErr := c.handleQuestionWithNewline(state.line+"?", "\r\n")
 			if qErr != nil {
-				fmt.Printf("  %% %v\n", qErr)
+				fmt.Printf("  %% %v\r\n", qErr)
 			}
 		}
 
@@ -320,6 +323,8 @@ func (c *CLI) execLine(line string) (bool, error) {
 		return c.cmdCopy(args)
 	case "write":
 		return c.cmdWrite(args)
+	case "erase":
+		return c.cmdErase(args)
 	case "show":
 		return false, c.cmdShow(args)
 	default:
@@ -408,7 +413,7 @@ func (c *CLI) cmdHelp() {
 	fmt.Println()
 	fmt.Println("Tips:")
 	if c.mode == ModeExec {
-		fmt.Println("  - Shortest unique prefixes are accepted (for example: conf t, sh ver).")
+		fmt.Println("  - Shortest unique prefixes are accepted (for example: conf t, sh ver, wr mem).")
 	} else {
 		fmt.Println("  - Shortest unique prefixes are accepted (for example: sh int br, sw acc vlan 10).")
 	}
@@ -436,11 +441,15 @@ func helpEntriesForMode(mode CLIMode) []helpEntry {
 	case ModeExec:
 		return append(common,
 			helpEntry{syntax: "show <subcommand>", description: "Display switch status and configuration"},
+			helpEntry{syntax: "show startup-config", description: "Cisco alias (mapped to running-config on this platform)"},
 			helpEntry{syntax: "configure terminal", description: "Enter global configuration mode (alias: conf t)"},
 			helpEntry{syntax: "clear counters [gi<N>]", description: "Clear all counters or a single interface counter"},
 			helpEntry{syntax: "test cable-diagnostics [interface gi<N>]", description: "Run cable diagnostics"},
+			helpEntry{syntax: "copy running-config startup-config", description: "Save config (Cisco alias)"},
 			helpEntry{syntax: "copy running-config <file>", description: "Backup running config to file"},
 			helpEntry{syntax: "copy <file> running-config", description: "Restore config from file and reboot"},
+			helpEntry{syntax: "write memory", description: "Save config (Cisco alias)"},
+			helpEntry{syntax: "erase startup-config", description: "Factory reset alias (equivalent to write erase)"},
 			helpEntry{syntax: "write erase", description: "Factory reset switch and reboot"},
 			helpEntry{syntax: "reload", description: "Reboot switch"},
 		)
@@ -536,7 +545,7 @@ func (c *CLI) cmdInterface(args string) error {
 	args = strings.TrimPrefix(strings.ToLower(args), "range ")
 	ports := parsePorts(args)
 	if len(ports) == 0 {
-		return fmt.Errorf("usage: interface port <N> or interface range gi1-3")
+		return fmt.Errorf("usage: interface {gi<N>|range gi<N>-<M>}")
 	}
 	for _, p := range ports {
 		if p < 1 || p > 8 {
@@ -1311,13 +1320,22 @@ func (c *CLI) cmdCopy(args string) (bool, error) {
 	if err := c.requireMode(ModeExec); err != nil {
 		return false, err
 	}
+	usage := "usage: copy running-config startup-config | copy running-config <file> | copy <file> running-config"
 	parts := strings.Fields(args)
 	if len(parts) < 2 {
-		return false, fmt.Errorf("usage: copy running-config <file> | copy <file> running-config")
+		return false, errors.New(usage)
 	}
-	src := strings.ToLower(parts[0])
-	dst := strings.ToLower(parts[1])
-	if src == "running-config" {
+	srcToken := normalizeKeyword(parts[0])
+	dstToken := normalizeKeyword(parts[1])
+
+	if srcToken == "running-config" && dstToken == "startup-config" {
+		return c.cmdWrite("memory")
+	}
+	if srcToken == "startup-config" && dstToken == "running-config" {
+		return false, fmt.Errorf("copy startup-config running-config is not supported on this platform")
+	}
+
+	if srcToken == "running-config" {
 		filename := parts[1]
 		data, err := c.client.BackupConfig()
 		if err != nil {
@@ -1329,7 +1347,7 @@ func (c *CLI) cmdCopy(args string) (bool, error) {
 		fmt.Printf("  Config saved to %q (%d bytes)\n", filename, len(data))
 		return false, nil
 	}
-	if dst == "running-config" {
+	if dstToken == "running-config" {
 		filename := parts[0]
 		data, err := os.ReadFile(filename)
 		if err != nil {
@@ -1345,7 +1363,7 @@ func (c *CLI) cmdCopy(args string) (bool, error) {
 		fmt.Println("  Config restored. Switch is rebooting...")
 		return true, nil
 	}
-	return false, fmt.Errorf("usage: copy running-config <file> | copy <file> running-config")
+	return false, errors.New(usage)
 }
 
 func (c *CLI) cmdWrite(args string) (bool, error) {
@@ -1353,8 +1371,18 @@ func (c *CLI) cmdWrite(args string) (bool, error) {
 		return false, err
 	}
 	part := strings.ToLower(strings.TrimSpace(args))
-	if sub, err := resolveKeyword(part, []string{"erase"}); err != nil || sub != "erase" {
-		return false, fmt.Errorf("usage: write erase")
+	if part == "" {
+		part = "memory"
+	}
+	sub, err := resolveKeyword(part, []string{"erase", "memory"})
+	if err != nil {
+		return false, fmt.Errorf("usage: write {memory|erase}")
+	}
+
+	if sub == "memory" {
+		fmt.Println("  Building configuration...")
+		fmt.Println("  [OK]")
+		return false, nil
 	}
 
 	currentIP := "(unavailable)"
@@ -1403,6 +1431,18 @@ func (c *CLI) cmdWrite(args string) (bool, error) {
 	return true, nil
 }
 
+func (c *CLI) cmdErase(args string) (bool, error) {
+	if err := c.requireMode(ModeExec); err != nil {
+		return false, err
+	}
+	part := strings.ToLower(strings.TrimSpace(args))
+	sub, err := resolveKeyword(part, []string{"startup-config"})
+	if err != nil || sub != "startup-config" {
+		return false, fmt.Errorf("usage: erase startup-config")
+	}
+	return c.cmdWrite("erase")
+}
+
 func (c *CLI) cmdShow(args string) error {
 	parts := strings.Fields(strings.ToLower(args))
 	if len(parts) == 0 {
@@ -1418,6 +1458,8 @@ func (c *CLI) cmdShow(args string) error {
 		return c.showVersion()
 	case "interfaces":
 		return c.showInterfaces(rest)
+	case "startup-config":
+		return c.showRunningConfig()
 	case "vlan-health":
 		return c.showVLANHealth()
 	case "vlan":
@@ -1473,6 +1515,9 @@ func (c *CLI) showInterfaces(args []string) error {
 	sub := "brief"
 	if len(args) > 0 {
 		sub = args[0]
+	}
+	if sub == "status" {
+		sub = "brief"
 	}
 	if sub == "counters" {
 		stats, err := c.client.GetPortStatistics()
@@ -1894,7 +1939,7 @@ func commandKeywordsForMode(mode CLIMode, noForm bool) []string {
 	common := []string{"exit", "quit", "end", "help"}
 	switch mode {
 	case ModeExec:
-		return append(common, "configure", "reload", "clear", "test", "copy", "write", "show")
+		return append(common, "configure", "reload", "clear", "test", "copy", "write", "erase", "show")
 	case ModeConfig:
 		return append(common, "interface", "vlan", "hostname", "ip", "spanning-tree", "igmp", "led", "username", "qos", "monitor", "mtu-vlan", "port-vlan", "show")
 	case ModeConfigIF:
@@ -1910,6 +1955,7 @@ func showSubcommandKeywords() []string {
 	return []string{
 		"version",
 		"interfaces",
+		"startup-config",
 		"vlan",
 		"vlan-health",
 		"ip",
@@ -2000,9 +2046,11 @@ func subcommandKeywords(cmd string) []string {
 	case "test":
 		return []string{"cable-diagnostics"}
 	case "copy":
-		return []string{"running-config"}
+		return []string{"running-config", "startup-config"}
 	case "write":
-		return []string{"erase"}
+		return []string{"erase", "memory"}
+	case "erase":
+		return []string{"startup-config"}
 	case "interface":
 		return []string{"port", "range"}
 	default:
@@ -2013,12 +2061,64 @@ func subcommandKeywords(cmd string) []string {
 func showSubcommandChildren(sub string) []string {
 	switch sub {
 	case "interfaces":
-		return []string{"brief", "counters", "port"}
+		return []string{"brief", "status", "counters", "port"}
 	case "qos":
 		return []string{"all", "basic", "bandwidth", "storm-control"}
 	default:
 		return nil
 	}
+}
+
+func switchportSubcommandChildren(path []string) []string {
+	if len(path) == 0 {
+		return []string{"access", "trunk", "pvid", "mode"}
+	}
+	switch path[0] {
+	case "access":
+		if len(path) == 1 {
+			return []string{"vlan"}
+		}
+	case "mode":
+		if len(path) == 1 {
+			return []string{"access", "trunk"}
+		}
+	case "trunk":
+		if len(path) == 1 {
+			return []string{"allowed", "vlan", "add", "remove"}
+		}
+		if len(path) == 2 && path[1] == "allowed" {
+			return []string{"vlan", "add", "remove"}
+		}
+		if len(path) == 2 && path[1] == "vlan" {
+			return []string{"add", "remove"}
+		}
+		if len(path) == 3 && path[1] == "allowed" && path[2] == "vlan" {
+			return []string{"add", "remove"}
+		}
+	}
+	return nil
+}
+
+func switchportCompletion(fixedTokens []string, partial string) []string {
+	resolved := make([]string, 0, len(fixedTokens))
+	children := switchportSubcommandChildren(resolved)
+
+	for idx, token := range fixedTokens {
+		if len(children) == 0 {
+			return nil
+		}
+		matches := prefixMatches(token, children)
+		if len(matches) != 1 {
+			if idx == len(fixedTokens)-1 {
+				return matches
+			}
+			return nil
+		}
+		resolved = append(resolved, matches[0])
+		children = switchportSubcommandChildren(resolved)
+	}
+
+	return prefixMatches(partial, children)
 }
 
 type completionContext struct {
@@ -2147,6 +2247,9 @@ func (c *CLI) completionCandidates(mode CLIMode, noForm bool, tokens []string, p
 		return matchedTop
 	}
 	cmd := matchedTop[0]
+	if cmd == "switchport" {
+		return switchportCompletion(tokens[1:], partial)
+	}
 	if cmd != "show" {
 		if len(tokens) > 1 {
 			return nil
@@ -2165,6 +2268,10 @@ func (c *CLI) completionCandidates(mode CLIMode, noForm bool, tokens []string, p
 }
 
 func (c *CLI) handleQuestion(line string) (bool, error) {
+	return c.handleQuestionWithNewline(line, "\n")
+}
+
+func (c *CLI) handleQuestionWithNewline(line string, newline string) (bool, error) {
 	line = strings.TrimSpace(line)
 	if !strings.Contains(line, "?") {
 		return false, nil
@@ -2175,16 +2282,15 @@ func (c *CLI) handleQuestion(line string) (bool, error) {
 
 	ctx := c.completionContextForLine(strings.TrimSuffix(line, "?"))
 	candidates := c.completionCandidates(ctx.mode, ctx.noForm, ctx.tokens, ctx.partial)
-	fmt.Println()
+	fmt.Print(newline)
 	if len(candidates) == 0 {
-		fmt.Println("  % no matching completions")
-		fmt.Println()
+		fmt.Printf("  %% no matching completions%s%s", newline, newline)
 		return true, nil
 	}
 	for _, cand := range candidates {
-		fmt.Printf("  %s\n", cand)
+		fmt.Printf("  %s%s", cand, newline)
 	}
-	fmt.Println()
+	fmt.Print(newline)
 	return true, nil
 }
 

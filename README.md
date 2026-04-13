@@ -34,6 +34,15 @@ Interactive completion (TTY mode):
 - Press `?` to show context-aware command help immediately (no Enter required)
 - Press `Tab` to complete commands using shortest unique matches
 
+Cisco IOS compatibility highlights:
+
+- `write memory` (also `wr mem`) to save configuration (IOS-style alias)
+- `copy running-config startup-config` to save configuration (IOS-style alias)
+- `erase startup-config` (alias for `write erase`) for factory reset flow
+- `show startup-config` (mapped to `show running-config` on this platform)
+- `show interfaces status` (alias to interface brief/status view)
+- `interface range gi1-4` enters `config-if-range` style mode
+
 When stdin is not a terminal (for example piped input), the CLI uses line-based input behavior.
 
 Optional auth flags:

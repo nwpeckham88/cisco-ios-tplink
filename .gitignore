@@ -20,3 +20,4 @@ coverage.out
 # Config backup files produced by the SDK
 *.bin
 *.cfg.bak
+dist/tplink-cli-linux-amd64/tplink-cli
