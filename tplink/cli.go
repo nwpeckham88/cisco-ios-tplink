@@ -72,7 +72,10 @@ func (c *CLI) Run() error {
 }
 
 func (c *CLI) execLine(line string) (bool, error) {
-	line = normalizeCommandHead(line)
+	handled, err := c.handleQuestion(line)
+	if handled {
+		return false, err
+	}
 	if strings.HasPrefix(strings.ToLower(line), "no ") {
 		return false, c.handleNo(strings.TrimSpace(line[3:]))
 	}
@@ -87,7 +90,10 @@ func (c *CLI) execLine(line string) (bool, error) {
 	if len(parts) == 0 {
 		return false, nil
 	}
-	cmd := strings.ToLower(parts[0])
+	cmd, err := resolveKeyword(parts[0], commandKeywordsForMode(c.mode, false))
+	if err != nil {
+		return false, err
+	}
 	args := ""
 	if len(parts) > 1 {
 		args = strings.Join(parts[1:], " ")
@@ -101,7 +107,7 @@ func (c *CLI) execLine(line string) (bool, error) {
 	case "end":
 		c.mode = ModeExec
 		return false, nil
-	case "help", "?":
+	case "help":
 		c.cmdHelp()
 		return false, nil
 	case "configure":
@@ -120,13 +126,13 @@ func (c *CLI) execLine(line string) (bool, error) {
 		return false, c.cmdFlowControl(true)
 	case "switchport":
 		return false, c.cmdSwitchport(args)
-	case "channel_group", "channel-group":
+	case "channel-group":
 		return false, c.cmdChannelGroup(args)
 	case "hostname":
 		return false, c.cmdHostname(args)
 	case "ip":
 		return false, c.cmdIP(args)
-	case "spanning_tree", "spanning-tree":
+	case "spanning-tree":
 		return false, c.cmdSpanningTree(true)
 	case "igmp":
 		return false, c.cmdIGMP(args)
@@ -138,13 +144,13 @@ func (c *CLI) execLine(line string) (bool, error) {
 		return false, c.cmdQoS(args)
 	case "bandwidth":
 		return false, c.cmdBandwidth(args)
-	case "storm_control", "storm-control":
+	case "storm-control":
 		return false, c.cmdStormControl(args)
 	case "monitor":
 		return false, c.cmdMonitor(args)
-	case "mtu_vlan", "mtu-vlan":
+	case "mtu-vlan":
 		return false, c.cmdMTUVLAN(args)
-	case "port_vlan", "port-vlan":
+	case "port-vlan":
 		return false, c.cmdPortVLAN(args)
 	case "reload":
 		return c.cmdReload(), nil
@@ -164,11 +170,14 @@ func (c *CLI) execLine(line string) (bool, error) {
 }
 
 func (c *CLI) handleNo(args string) error {
-	parts := strings.Fields(normalizeCommandHead(args))
+	parts := strings.Fields(args)
 	if len(parts) == 0 {
 		return fmt.Errorf("incomplete command")
 	}
-	cmd := strings.ToLower(parts[0])
+	cmd, err := resolveKeyword(parts[0], commandKeywordsForMode(c.mode, true))
+	if err != nil {
+		return err
+	}
 	rest := ""
 	if len(parts) > 1 {
 		rest = strings.Join(parts[1:], " ")
@@ -183,7 +192,7 @@ func (c *CLI) handleNo(args string) error {
 	if cmd == "flowcontrol" {
 		return c.cmdFlowControl(false)
 	}
-	if cmd == "channel_group" || cmd == "channel-group" {
+	if cmd == "channel-group" {
 		return c.cmdNoChannelGroup(rest)
 	}
 	if cmd == "vlan" {
@@ -192,7 +201,7 @@ func (c *CLI) handleNo(args string) error {
 	if cmd == "ip" {
 		return c.cmdNoIP(rest)
 	}
-	if cmd == "spanning_tree" || cmd == "spanning-tree" {
+	if cmd == "spanning-tree" {
 		return c.cmdSpanningTree(false)
 	}
 	if cmd == "igmp" {
@@ -204,16 +213,16 @@ func (c *CLI) handleNo(args string) error {
 	if cmd == "bandwidth" {
 		return c.cmdNoBandwidth(rest)
 	}
-	if cmd == "storm_control" || cmd == "storm-control" {
+	if cmd == "storm-control" {
 		return c.cmdNoStormControl()
 	}
 	if cmd == "monitor" {
 		return c.cmdNoMonitor(rest)
 	}
-	if cmd == "mtu_vlan" || cmd == "mtu-vlan" {
+	if cmd == "mtu-vlan" {
 		return c.cmdNoMTUVLAN()
 	}
-	if cmd == "port_vlan" || cmd == "port-vlan" {
+	if cmd == "port-vlan" {
 		return c.cmdNoPortVLAN(rest)
 	}
 	return fmt.Errorf("no-form for %q is not supported", cmd)
@@ -235,6 +244,8 @@ func (c *CLI) cmdExit() bool {
 func (c *CLI) cmdHelp() {
 	fmt.Printf("\nMode: %s\n", c.mode)
 	fmt.Println("Common: show, configure terminal, interface, vlan, end, exit")
+	fmt.Println("Use shortest unique command prefixes (for example: conf t, sh ver).")
+	fmt.Println("Use '?' for command completion/help (for example: sh ?, interface ?).")
 	fmt.Println("Use 'do show ...' from config modes.")
 	fmt.Println()
 }
@@ -409,7 +420,10 @@ func (c *CLI) cmdSwitchport(args string) error {
 	if len(parts) == 0 {
 		return fmt.Errorf("usage: switchport {access|trunk|pvid|mode} ...")
 	}
-	sub := parts[0]
+	sub, err := resolveKeyword(parts[0], []string{"access", "trunk", "pvid", "mode"})
+	if err != nil {
+		return err
+	}
 	switch sub {
 	case "pvid":
 		if len(parts) < 2 {
@@ -1100,32 +1114,35 @@ func (c *CLI) cmdShow(args string) error {
 	if len(parts) == 0 {
 		return fmt.Errorf("usage: show <subcommand>")
 	}
-	sub := parts[0]
+	sub, err := resolveKeyword(parts[0], showSubcommandKeywords())
+	if err != nil {
+		return err
+	}
 	rest := parts[1:]
-	switch {
-	case strings.HasPrefix("version", sub):
+	switch sub {
+	case "version":
 		return c.showVersion()
-	case strings.HasPrefix("interfaces", sub):
+	case "interfaces":
 		return c.showInterfaces(rest)
-	case strings.HasPrefix("vlan-health", sub):
+	case "vlan-health":
 		return c.showVLANHealth()
-	case strings.HasPrefix("vlan", sub):
+	case "vlan":
 		return c.showVLAN(rest)
-	case strings.HasPrefix("ip", sub):
+	case "ip":
 		return c.showIP()
-	case strings.HasPrefix("running-config", sub):
+	case "running-config":
 		return c.showRunningConfig()
-	case strings.HasPrefix("qos", sub):
+	case "qos":
 		return c.showQoS(rest)
-	case strings.HasPrefix("spanning-tree", sub):
+	case "spanning-tree":
 		return c.showSpanningTree()
-	case strings.HasPrefix("port-mirror", sub):
+	case "port-mirror":
 		return c.showPortMirror()
-	case strings.HasPrefix("etherchannel", sub):
+	case "etherchannel":
 		return c.showEtherChannel()
-	case strings.HasPrefix("mtu-vlan", sub):
+	case "mtu-vlan":
 		return c.showMTUVLAN()
-	case strings.HasPrefix("cable-diag", sub):
+	case "cable-diag":
 		ports := []int{}
 		if len(rest) > 0 {
 			ports = parsePorts(rest[0])
@@ -1568,13 +1585,233 @@ func (c *CLI) showMTUVLAN() error {
 	return nil
 }
 
-func normalizeCommandHead(line string) string {
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
-		return line
+func commandKeywordsForMode(mode CLIMode, noForm bool) []string {
+	if noForm {
+		switch mode {
+		case ModeConfig:
+			return []string{"vlan", "ip", "spanning-tree", "igmp", "led", "monitor", "mtu-vlan", "port-vlan"}
+		case ModeConfigIF:
+			return []string{"shutdown", "flowcontrol", "channel-group", "bandwidth", "storm-control"}
+		default:
+			return nil
+		}
 	}
-	parts[0] = strings.ReplaceAll(parts[0], "-", "_")
-	return strings.Join(parts, " ")
+
+	common := []string{"exit", "quit", "end", "help"}
+	switch mode {
+	case ModeExec:
+		return append(common, "configure", "reload", "clear", "test", "copy", "write", "show")
+	case ModeConfig:
+		return append(common, "interface", "vlan", "hostname", "ip", "spanning-tree", "igmp", "led", "username", "qos", "monitor", "mtu-vlan", "port-vlan", "show")
+	case ModeConfigIF:
+		return append(common, "shutdown", "speed", "flowcontrol", "switchport", "channel-group", "qos", "bandwidth", "storm-control", "show")
+	case ModeConfigVLAN:
+		return append(common, "name", "show")
+	default:
+		return append(common, "show")
+	}
+}
+
+func showSubcommandKeywords() []string {
+	return []string{
+		"version",
+		"interfaces",
+		"vlan",
+		"vlan-health",
+		"ip",
+		"running-config",
+		"qos",
+		"spanning-tree",
+		"port-mirror",
+		"etherchannel",
+		"mtu-vlan",
+		"cable-diag",
+	}
+}
+
+func normalizeKeyword(token string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(token)), "_", "-")
+}
+
+func uniqueNormalized(options []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(options))
+	for _, opt := range options {
+		norm := normalizeKeyword(opt)
+		if norm == "" {
+			continue
+		}
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func prefixMatches(partial string, options []string) []string {
+	partial = normalizeKeyword(partial)
+	all := uniqueNormalized(options)
+	if partial == "" {
+		return all
+	}
+	matches := make([]string, 0, len(all))
+	for _, opt := range all {
+		if strings.HasPrefix(opt, partial) {
+			matches = append(matches, opt)
+		}
+	}
+	return matches
+}
+
+func resolveKeyword(token string, options []string) (string, error) {
+	token = normalizeKeyword(token)
+	if token == "" {
+		return "", fmt.Errorf("incomplete command")
+	}
+	all := uniqueNormalized(options)
+	for _, opt := range all {
+		if opt == token {
+			return opt, nil
+		}
+	}
+	matches := prefixMatches(token, all)
+	if len(matches) == 0 {
+		return "", fmt.Errorf("unknown command: %q", token)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("ambiguous command %q (%s)", token, strings.Join(matches, ", "))
+	}
+	return matches[0], nil
+}
+
+func subcommandKeywords(cmd string) []string {
+	switch cmd {
+	case "configure":
+		return []string{"terminal"}
+	case "show":
+		return showSubcommandKeywords()
+	case "switchport":
+		return []string{"access", "trunk", "pvid", "mode"}
+	case "qos":
+		return []string{"mode", "port-priority"}
+	case "ip":
+		return []string{"address", "default-gateway"}
+	case "monitor":
+		return []string{"session"}
+	case "clear":
+		return []string{"counters"}
+	case "test":
+		return []string{"cable-diagnostics"}
+	case "copy":
+		return []string{"running-config"}
+	case "write":
+		return []string{"erase"}
+	case "interface":
+		return []string{"port", "range"}
+	default:
+		return nil
+	}
+}
+
+func showSubcommandChildren(sub string) []string {
+	switch sub {
+	case "interfaces":
+		return []string{"brief", "counters", "port"}
+	case "qos":
+		return []string{"all", "basic", "bandwidth", "storm-control"}
+	default:
+		return nil
+	}
+}
+
+func (c *CLI) completionCandidates(mode CLIMode, noForm bool, tokens []string, partial string) []string {
+	cmds := commandKeywordsForMode(mode, noForm)
+	if len(tokens) == 0 {
+		return prefixMatches(partial, cmds)
+	}
+
+	matchedTop := prefixMatches(tokens[0], cmds)
+	if len(tokens) == 1 {
+		if len(matchedTop) != 1 {
+			return matchedTop
+		}
+		return prefixMatches(partial, subcommandKeywords(matchedTop[0]))
+	}
+
+	if len(matchedTop) != 1 {
+		return matchedTop
+	}
+	cmd := matchedTop[0]
+	if cmd != "show" {
+		return prefixMatches(partial, subcommandKeywords(cmd))
+	}
+
+	if len(tokens) == 2 {
+		matchedShowSub := prefixMatches(tokens[1], showSubcommandKeywords())
+		if len(matchedShowSub) != 1 {
+			return matchedShowSub
+		}
+		return prefixMatches(partial, showSubcommandChildren(matchedShowSub[0]))
+	}
+	return nil
+}
+
+func (c *CLI) handleQuestion(line string) (bool, error) {
+	line = strings.TrimSpace(line)
+	if !strings.Contains(line, "?") {
+		return false, nil
+	}
+	if strings.Count(line, "?") > 1 || !strings.HasSuffix(line, "?") {
+		return true, fmt.Errorf("place ? at the end of the command")
+	}
+
+	beforeQ := strings.TrimSuffix(line, "?")
+	trailingSpaceBeforeQ := strings.HasSuffix(beforeQ, " ")
+	beforeQ = strings.TrimSpace(beforeQ)
+
+	mode := c.mode
+	noForm := false
+	parts := strings.Fields(beforeQ)
+	if len(parts) > 0 && normalizeKeyword(parts[0]) == "do" {
+		mode = ModeExec
+		if len(parts) > 1 {
+			beforeQ = strings.Join(parts[1:], " ")
+		} else {
+			beforeQ = ""
+		}
+	}
+	parts = strings.Fields(beforeQ)
+	if len(parts) > 0 && normalizeKeyword(parts[0]) == "no" {
+		noForm = true
+		if len(parts) > 1 {
+			beforeQ = strings.Join(parts[1:], " ")
+		} else {
+			beforeQ = ""
+		}
+	}
+
+	tokens := strings.Fields(beforeQ)
+	partial := ""
+	if !trailingSpaceBeforeQ && len(tokens) > 0 {
+		partial = tokens[len(tokens)-1]
+		tokens = tokens[:len(tokens)-1]
+	}
+
+	candidates := c.completionCandidates(mode, noForm, tokens, partial)
+	fmt.Println()
+	if len(candidates) == 0 {
+		fmt.Println("  % no matching completions")
+		fmt.Println()
+		return true, nil
+	}
+	for _, cand := range candidates {
+		fmt.Printf("  %s\n", cand)
+	}
+	fmt.Println()
+	return true, nil
 }
 
 func parsePorts(spec string) []int {
