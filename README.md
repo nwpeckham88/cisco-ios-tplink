@@ -74,6 +74,14 @@ Optional auth flags:
 go run ./cmd/tplink-cli 192.168.0.1 --user admin --password secret
 ```
 
+Run a native CLI command file non-interactively:
+
+```bash
+go run ./cmd/tplink-cli 192.168.0.1 --config-file examples/iac/v1-static.cfg
+```
+
+The config file can use the same Cisco-style commands you would type in the interactive CLI. See [examples/iac/v1-static.cfg](examples/iac/v1-static.cfg) and [examples/iac/v1-dhcp.cfg](examples/iac/v1-dhcp.cfg).
+
 `--password` is supported for compatibility but less secure than env/stdin/file.
 
 Password source precedence:

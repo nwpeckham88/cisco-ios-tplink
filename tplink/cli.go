@@ -79,6 +79,43 @@ func (c *CLI) Run() error {
 	return c.runLineScanner()
 }
 
+func (c *CLI) RunScript(r io.Reader, sourceName string) error {
+	if sourceName == "" {
+		sourceName = "<script>"
+	}
+
+	scanner := bufio.NewScanner(r)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "!") {
+			continue
+		}
+		quit, err := c.execLine(line)
+		if err != nil {
+			return fmt.Errorf("%s:%d: %w", sourceName, lineNumber, err)
+		}
+		if quit {
+			return nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("%s: %w", sourceName, err)
+	}
+	return nil
+}
+
+func (c *CLI) RunScriptFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open script %s: %w", path, err)
+	}
+	defer file.Close()
+
+	return c.RunScript(file, path)
+}
+
 func (c *CLI) runLineScanner() error {
 	s := bufio.NewScanner(os.Stdin)
 	for {
