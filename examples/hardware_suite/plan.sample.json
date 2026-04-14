@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "target": {
+    "host": "192.168.0.1",
+    "username": "admin",
+    "initial_password_env": "TPLINK_PASSWORD",
+    "post_reset_password": "testpass"
+  },
+  "safety": {
+    "enabled": true,
+    "confirm": "I_UNDERSTAND_THIS_WILL_FACTORY_RESET_MY_SWITCH"
+  },
+  "timing": {
+    "reset_grace": "5s",
+    "reconnect_timeout": "180s",
+    "poll_interval": "2s",
+    "post_mutation_settle": "2s"
+  },
+  "artifacts": {
+    "output_dir": "artifacts/hardware-suite",
+    "decode_summary": true
+  },
+  "mutations": [
+    {
+      "id": "change-admin-password-1",
+      "kind": "change-password",
+      "old_password": "testpass",
+      "new_password": "Pass1234"
+    },
+    {
+      "id": "change-admin-password-2",
+      "kind": "change-password",
+      "new_password": "Pass5678"
+    },
+    {
+      "id": "apply-static-profile",
+      "kind": "script-file",
+      "script_file": "examples/iac/v1-static.cfg",
+      "next_password": "Pass5678"
+    },
+    {
+      "id": "inline-hostname-mutation",
+      "kind": "script-inline",
+      "script_lines": [
+        "configure terminal",
+        "hostname diff-host",
+        "end"
+      ],
+      "next_password": "Pass5678"
+    }
+  ]
+}

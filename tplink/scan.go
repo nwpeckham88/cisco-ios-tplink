@@ -1,12 +1,20 @@
 package tplink
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+var ErrNonTPLinkSmartSwitch = errors.New("device did not match TP-Link smart switch signature")
+
+const maxFingerprintBodyBytes int64 = 64 << 10
 
 type ScanOptions struct {
 	CIDR     string
@@ -16,6 +24,9 @@ type ScanOptions struct {
 	MaxHosts int
 	Username string
 	Password string
+
+	// FingerprintOnly skips login and only fingerprints the web UI.
+	FingerprintOnly bool
 
 	// Probe is optional and intended for tests.
 	Probe func(host string, options ScanOptions) (*SystemInfo, error)
@@ -176,6 +187,17 @@ func defaultScanProbe(host string, options ScanOptions) (*SystemInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := assertTPLinkWebUISignature(client); err != nil {
+		return nil, err
+	}
+	if options.FingerprintOnly {
+		return &SystemInfo{
+			Description: "TP-Link web UI fingerprint",
+			Firmware:    "unknown (unauthenticated)",
+			IP:          host,
+			Hardware:    "unknown (unauthenticated)",
+		}, nil
+	}
 	if err := client.Login(); err != nil {
 		return nil, err
 	}
@@ -186,6 +208,85 @@ func defaultScanProbe(host string, options ScanOptions) (*SystemInfo, error) {
 		return nil, err
 	}
 	return &info, nil
+}
+
+func assertTPLinkWebUISignature(client *Client) error {
+	candidates := []string{"/", "/logon.cgi"}
+	var lastErr error
+	hadResponse := false
+	for _, path := range candidates {
+		body, err := fingerprintProbeBody(client, path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		hadResponse = true
+		if looksLikeTPLinkWebUI(body) {
+			return nil
+		}
+	}
+	if !hadResponse && lastErr != nil {
+		return lastErr
+	}
+	return ErrNonTPLinkSmartSwitch
+}
+
+func fingerprintProbeBody(client *Client, path string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, client.URL(path), nil)
+	if err != nil {
+		return "", fmt.Errorf("build %s request: %w", http.MethodGet, err)
+	}
+	resp, err := client.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("%s %s failed: status %d body=%q", http.MethodGet, req.URL.String(), resp.StatusCode, string(b))
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxFingerprintBodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("read response body: %w", err)
+	}
+	return string(b), nil
+}
+
+func looksLikeTPLinkWebUI(body string) bool {
+	normalized := strings.ToUpper(body)
+	hasBrand := strings.Contains(normalized, "TP-LINK") || strings.Contains(normalized, "TPLINK")
+	hasModelFamily := strings.Contains(normalized, "TL-SG") || strings.Contains(normalized, "TL-SF") || strings.Contains(normalized, "EASY SMART")
+	hasLegacyScript := strings.Contains(normalized, "LOGONINFO = NEW ARRAY") || strings.Contains(normalized, "ERRTYPE=LOGONINFO")
+
+	assetHits := 0
+	for _, marker := range []string{"LOGO.PNG", "TOP_BG.GIF", "BUTTON.GIF"} {
+		if strings.Contains(normalized, marker) {
+			assetHits++
+		}
+	}
+
+	// Full legacy asset triplet is a strong TP-Link fingerprint by itself.
+	if assetHits >= 3 {
+		return true
+	}
+
+	classes := 0
+	if hasBrand {
+		classes++
+	}
+	if hasModelFamily {
+		classes++
+	}
+	if hasLegacyScript {
+		classes++
+	}
+	if assetHits >= 2 {
+		classes++
+	}
+
+	return classes >= 2
 }
 
 func ipToUint32(addr netip.Addr) uint32 {

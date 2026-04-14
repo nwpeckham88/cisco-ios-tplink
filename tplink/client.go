@@ -76,6 +76,8 @@ var loginErrTypePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\blogonInfo\s*=\s*new\s+Array\(\s*(\d+)`),
 }
 
+var ErrAuthenticationFailed = errors.New("authentication failed")
+
 func NewClient(host string, opts ...Option) (*Client, error) {
 	if strings.TrimSpace(host) == "" {
 		return nil, fmt.Errorf("host must not be empty")
@@ -241,7 +243,7 @@ func (c *Client) Login() error {
 
 	errType, ok := parseLoginErrType(string(body))
 	if ok && errType != 0 {
-		return fmt.Errorf("login failed (errType=%d): check username and password", errType)
+		return fmt.Errorf("%w: login failed (errType=%d): check username and password", ErrAuthenticationFailed, errType)
 	}
 
 	if !c.hasSSIDCookie() {

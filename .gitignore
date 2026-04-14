@@ -22,4 +22,5 @@ coverage.out
 *.cfg.bak
 dist/tplink-cli-linux-amd64/tplink-cli
 dist/releases/
-tplink-cli
+/tplink-cli
+artifacts/hardware-suite/

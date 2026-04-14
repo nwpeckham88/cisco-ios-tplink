@@ -42,6 +42,12 @@ func runDiffCLI(basePath string, candidatePath string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+func runInferStructureCLI(dirPath string) ([]byte, error) {
+	cmd := exec.Command("go", "run", ".", "--infer-backup-structure-dir", dirPath)
+	cmd.Dir = "."
+	return cmd.CombinedOutput()
+}
+
 func TestDecodeBackupModeIsHostless(t *testing.T) {
 	tmpDir := t.TempDir()
 	backupPath := filepath.Join(tmpDir, "sample.cfg")
@@ -195,5 +201,105 @@ func TestDecodeAndDiffModesConflict(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "mutually exclusive") {
 		t.Fatalf("expected mutually-exclusive mode error, got:\n%s", string(out))
+	}
+}
+
+func TestInferBackupStructureModeIsHostless(t *testing.T) {
+	tmpDir := t.TempDir()
+	backupsDir := filepath.Join(tmpDir, "backups")
+	if err := os.MkdirAll(backupsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", backupsDir, err)
+	}
+
+	base := buildDecodeFixture(2258)
+	candidate := buildDecodeFixture(2258)
+	candidate[120] ^= 0xFF
+
+	basePath := filepath.Join(backupsDir, "000-baseline.bin")
+	candidatePath := filepath.Join(backupsDir, "001-candidate.bin")
+	if err := os.WriteFile(basePath, base, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", basePath, err)
+	}
+	if err := os.WriteFile(candidatePath, candidate, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", candidatePath, err)
+	}
+
+	out, err := runInferStructureCLI(backupsDir)
+	if err != nil {
+		t.Fatalf("infer structure mode failed: %v\n%s", err, string(out))
+	}
+
+	text := string(out)
+	if !strings.Contains(text, "Backup Structure Inference") {
+		t.Fatalf("expected inference output, got:\n%s", text)
+	}
+	if strings.Contains(text, "Connecting to") {
+		t.Fatalf("inference mode should not attempt network login, got:\n%s", text)
+	}
+}
+
+func TestInferBackupStructureRejectsPositionalHost(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "192.168.0.1", "--infer-backup-structure-dir", t.TempDir())
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected host+infer conflict to fail, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "hostless") {
+		t.Fatalf("expected hostless conflict message, got:\n%s", string(out))
+	}
+}
+
+func TestInferBackupStructureRejectsBaselineOutsideDirectory(t *testing.T) {
+	dir := t.TempDir()
+	backupsDir := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backupsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", backupsDir, err)
+	}
+
+	inDir := filepath.Join(backupsDir, "000-baseline.bin")
+	other := filepath.Join(dir, "outside.bin")
+	if err := os.WriteFile(inDir, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", inDir, err)
+	}
+	if err := os.WriteFile(other, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", other, err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "--infer-backup-structure-dir", backupsDir, "--infer-backup-baseline", other)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected outside baseline rejection, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "must be inside") {
+		t.Fatalf("expected containment error, got:\n%s", string(out))
+	}
+}
+
+func TestInferBackupStructureSingleFileBaselineStillFails(t *testing.T) {
+	baseDir := t.TempDir()
+	backupsDir := filepath.Join(baseDir, "backups")
+	if err := os.MkdirAll(backupsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", backupsDir, err)
+	}
+
+	baseline := filepath.Join(backupsDir, "000-baseline.bin")
+	if err := os.WriteFile(baseline, buildDecodeFixture(2258), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", baseline, err)
+	}
+	absBaseline, err := filepath.Abs(baseline)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", baseline, err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "--infer-backup-structure-dir", backupsDir, "--infer-backup-baseline", absBaseline)
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected missing candidate error, output=%s", string(out))
+	}
+	if !strings.Contains(string(out), "need at least one candidate backup") {
+		t.Fatalf("expected no-candidate error, got:\n%s", string(out))
 	}
 }

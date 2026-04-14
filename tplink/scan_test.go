@@ -1,12 +1,112 @@
 package tplink
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAssertTPLinkWebUISignatureAcceptsFingerprintPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<html><img src="logo.png"><div style="background-image:url(top_bg.gif)"></div><script>var a='button.gif';</script></html>`)
+		case "/logon.cgi":
+			fmt.Fprint(w, "ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := NewClient(host, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := assertTPLinkWebUISignature(client); err != nil {
+		t.Fatalf("assertTPLinkWebUISignature: %v", err)
+	}
+}
+
+func TestAssertTPLinkWebUISignatureRejectsGenericPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/logon.cgi":
+			fmt.Fprint(w, `<html><body><h1>Generic Appliance</h1><form action="/login"></form></body></html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := NewClient(host, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = assertTPLinkWebUISignature(client)
+	if err == nil {
+		t.Fatalf("expected non-TP-Link rejection")
+	}
+	if !errors.Is(err, ErrNonTPLinkSmartSwitch) {
+		t.Fatalf("expected ErrNonTPLinkSmartSwitch, got: %v", err)
+	}
+}
+
+func TestAssertTPLinkWebUISignaturePropagatesHTTPProbeErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not available", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := NewClient(host, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = assertTPLinkWebUISignature(client)
+	if err == nil {
+		t.Fatalf("expected probe error")
+	}
+	if errors.Is(err, ErrNonTPLinkSmartSwitch) {
+		t.Fatalf("expected underlying HTTP error, got non-tp-link sentinel")
+	}
+}
+
+func TestLooksLikeTPLinkWebUIAcceptsImageAssetFingerprints(t *testing.T) {
+	body := `<html><head><style>.top{background-image:url(top_bg.gif)}</style></head><body><img src="logo.png"><script>var b='button.gif';</script></body></html>`
+	if !looksLikeTPLinkWebUI(body) {
+		t.Fatalf("expected TP-Link web UI fingerprint match")
+	}
+}
+
+func TestLooksLikeTPLinkWebUIRejectsGenericLoginMarkup(t *testing.T) {
+	body := `<html><body><h1>Sign In</h1><form action="/login"></form><img src="logo.png"></body></html>`
+	if looksLikeTPLinkWebUI(body) {
+		t.Fatalf("expected generic login page to be rejected")
+	}
+}
+
+func TestLooksLikeTPLinkWebUIRejectsSingleSpoofedToken(t *testing.T) {
+	body := `<html><body><h1>Welcome</h1><div>TP-Link compatible management page</div></body></html>`
+	if looksLikeTPLinkWebUI(body) {
+		t.Fatalf("expected single-token spoof to be rejected")
+	}
+}
+
+func TestLooksLikeTPLinkWebUIAcceptsBrandAndLegacyScriptSignals(t *testing.T) {
+	body := `<script>var logonInfo = new Array(0,0,0); var errType=logonInfo[0];</script><div>TP-Link Corporation Limited</div>`
+	if !looksLikeTPLinkWebUI(body) {
+		t.Fatalf("expected multi-signal TP-Link fingerprint match")
+	}
+}
 
 func TestExpandCIDRHostsIPv4ExcludesNetworkAndBroadcast(t *testing.T) {
 	hosts, truncated, err := ExpandCIDRHosts("192.168.1.0/30", 10)
