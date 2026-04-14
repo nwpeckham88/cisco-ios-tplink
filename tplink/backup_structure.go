@@ -143,7 +143,7 @@ func FormatBackupStructureReport(report BackupStructureReport) string {
 }
 
 func knownBackupStructureRanges() []BackupStructureRange {
-	return []BackupStructureRange{
+	ranges := []BackupStructureRange{
 		{Offset: 0x00, Length: 4, Label: "magic"},
 		{Offset: offsetIP, Length: 4, Label: "ip"},
 		{Offset: offsetNetmask, Length: 4, Label: "netmask"},
@@ -152,8 +152,53 @@ func knownBackupStructureRanges() []BackupStructureRange {
 		{Offset: offsetHostname, Length: maxHostnameLen, Label: "hostname"},
 		{Offset: offsetCredentialBlob, Length: credentialBlobLen, Label: "credential blob"},
 		{Offset: offsetObfuscatedPassword, Length: obfuscatedPasswordLen, Label: "obfuscated password slot"},
+		{Offset: offsetMirrorDestination, Length: 1, Label: "mirror destination port"},
+		{Offset: offsetPortVLANMatrixBase + (0 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi1"},
+		{Offset: offsetPortVLANMatrixBase + (1 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi2"},
+		{Offset: offsetPortVLANMatrixBase + (2 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi3"},
+		{Offset: offsetPortVLANMatrixBase + (3 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi4"},
+		{Offset: offsetPortVLANMatrixBase + (4 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi5"},
+		{Offset: offsetPortVLANMatrixBase + (5 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi6"},
+		{Offset: offsetPortVLANMatrixBase + (6 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi7"},
+		{Offset: offsetPortVLANMatrixBase + (7 * portVLANMatrixStride), Length: 1, Label: "port-vlan matrix gi8"},
+		{Offset: offsetPortVLANPortIDs + 0, Length: 1, Label: "port-vlan id gi1"},
+		{Offset: offsetPortVLANPortIDs + 1, Length: 1, Label: "port-vlan id gi2"},
+		{Offset: offsetPortVLANPortIDs + 2, Length: 1, Label: "port-vlan id gi3"},
+		{Offset: offsetPortVLANPortIDs + 3, Length: 1, Label: "port-vlan id gi4"},
+		{Offset: offsetPortVLANPortIDs + 4, Length: 1, Label: "port-vlan id gi5"},
+		{Offset: offsetPortVLANPortIDs + 5, Length: 1, Label: "port-vlan id gi6"},
+		{Offset: offsetPortVLANPortIDs + 6, Length: 1, Label: "port-vlan id gi7"},
+		{Offset: offsetPortVLANPortIDs + 7, Length: 1, Label: "port-vlan id gi8"},
+		{Offset: offsetPortVLANModeA, Length: 1, Label: "port-vlan mode signature a"},
+		{Offset: offsetPortVLANModeB, Length: 1, Label: "port-vlan mode signature b"},
 		{Offset: offsetVLANName, Length: maxVLANNameLen, Label: "vlan name"},
+		{Offset: offsetQoSPort1Priority, Length: 1, Label: "qos gi1 priority"},
+		{Offset: offsetQoSPort2Priority, Length: 1, Label: "qos gi2 priority"},
+		{Offset: offsetQoSPort3Priority, Length: 1, Label: "qos gi3 priority"},
+		{Offset: offsetQoSPort4Priority, Length: 1, Label: "qos gi4 priority"},
+		{Offset: offsetQoSPort5Priority, Length: 1, Label: "qos gi5 priority"},
+		{Offset: offsetQoSPort6Priority, Length: 1, Label: "qos gi6 priority"},
+		{Offset: offsetQoSPort7Priority, Length: 1, Label: "qos gi7 priority"},
+		{Offset: offsetQoSPort8Priority, Length: 1, Label: "qos gi8 priority"},
+		{Offset: offsetLoopPreventionFlag, Length: 1, Label: "loop prevention flag"},
+		{Offset: offsetLoopPreventionMode, Length: 1, Label: "loop prevention mode"},
+		{Offset: offsetIGMPFlag, Length: 1, Label: "igmp snooping flag"},
+		{Offset: offsetIGMPReportSuppFlag, Length: 1, Label: "igmp report-suppression flag"},
+		{Offset: offsetQoSModeSigA, Length: 1, Label: "qos mode signature a"},
+		{Offset: offsetQoSModeSigB, Length: 1, Label: "qos mode signature b"},
+		{Offset: offsetQoSModeSigC, Length: 1, Label: "qos mode signature c"},
+		{Offset: offsetLEDFlag, Length: 1, Label: "led flag"},
 	}
+	for port := 0; port < stormControlPortCount; port++ {
+		for slot := 0; slot < stormControlSlotCount; slot++ {
+			ranges = append(ranges, BackupStructureRange{
+				Offset: stormControlOffset(port, slot),
+				Length: 1,
+				Label:  fmt.Sprintf("storm gi%d %s", port+1, stormControlSlotLabel(slot)),
+			})
+		}
+	}
+	return ranges
 }
 
 func computeChangedRuns(base []byte, candidate []byte) ([]BackupDiffRun, int) {

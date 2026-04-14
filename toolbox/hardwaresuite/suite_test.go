@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nwpeckham88/cisco-ios-tplink/tplink"
 )
 
 type fakeHardwareSuiteOps struct {
@@ -145,6 +147,86 @@ func TestRunHardwareSuiteWithOpsCombinesFinalResetError(t *testing.T) {
 	}
 	if index.Cleanup.FinalResetError == "" {
 		t.Fatal("expected cleanup error recorded")
+	}
+}
+
+func TestDecodeSummaryBriefPreservesOptionalFlagPresence(t *testing.T) {
+	decoded := tplink.DecodedBackupConfig{
+		Hostname:                     "sw",
+		IP:                           "192.0.2.10",
+		Netmask:                      "255.255.255.0",
+		Gateway:                      "192.0.2.1",
+		DHCPEnabled:                  true,
+		QoSModePresent:               false,
+		QoSModeKnown:                 false,
+		QoSMode:                      "",
+		QoSPort1PriorityPresent:      false,
+		QoSPort1PriorityKnown:        false,
+		QoSPort1Priority:             0,
+		LoopPreventionPresent:        false,
+		LoopPreventionEnabled:        false,
+		IGMPSnoopingPresent:          false,
+		IGMPSnoopingEnabled:          false,
+		IGMPReportSuppressionPresent: false,
+		IGMPReportSuppressionEnabled: false,
+		LEDPresent:                   false,
+		LEDEnabled:                   false,
+		VLANName:                     "Default",
+	}
+
+	brief := decodeSummaryBrief(decoded)
+	if brief.IGMPKnown {
+		t.Fatal("IGMPKnown = true, want false")
+	}
+	if brief.LEDKnown {
+		t.Fatal("LEDKnown = true, want false")
+	}
+	if brief.STPKnown {
+		t.Fatal("STPKnown = true, want false")
+	}
+	if brief.QoSModeKnown {
+		t.Fatal("QoSModeKnown = true, want false")
+	}
+	if brief.QoSGi1PriorityKnown {
+		t.Fatal("QoSGi1PriorityKnown = true, want false")
+	}
+	if brief.IGMPReportSuppressionKnown {
+		t.Fatal("IGMPReportSuppressionKnown = true, want false")
+	}
+
+	decoded.QoSModePresent = true
+	decoded.QoSModeKnown = true
+	decoded.QoSMode = "dscp"
+	decoded.QoSPort1PriorityPresent = true
+	decoded.QoSPort1PriorityKnown = true
+	decoded.QoSPort1Priority = 1
+	decoded.LoopPreventionPresent = true
+	decoded.LoopPreventionEnabled = true
+	decoded.IGMPSnoopingPresent = true
+	decoded.IGMPSnoopingEnabled = true
+	decoded.IGMPReportSuppressionPresent = true
+	decoded.IGMPReportSuppressionEnabled = false
+	decoded.LEDPresent = true
+	decoded.LEDEnabled = false
+
+	brief = decodeSummaryBrief(decoded)
+	if !brief.IGMPKnown || !brief.IGMP {
+		t.Fatalf("expected IGMP known/enabled, got %+v", brief)
+	}
+	if !brief.STPKnown || !brief.STP {
+		t.Fatalf("expected STP known/enabled, got %+v", brief)
+	}
+	if !brief.QoSModeKnown || brief.QoSMode != "dscp" {
+		t.Fatalf("expected QoS mode known=dscp, got %+v", brief)
+	}
+	if !brief.QoSGi1PriorityKnown || brief.QoSGi1Priority != 1 {
+		t.Fatalf("expected QoS gi1 priority known=1, got %+v", brief)
+	}
+	if !brief.IGMPReportSuppressionKnown || brief.IGMPReportSuppression {
+		t.Fatalf("expected IGMP report-suppression known/disabled, got %+v", brief)
+	}
+	if !brief.LEDKnown || brief.LED {
+		t.Fatalf("expected LED known/off, got %+v", brief)
 	}
 }
 

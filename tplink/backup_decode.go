@@ -25,8 +25,42 @@ const (
 	credentialBlobLen        = 32
 	offsetObfuscatedPassword = 0x49
 	obfuscatedPasswordLen    = 8
+	offsetMirrorDestination  = 0x00de
+	offsetPortVLANMatrixBase = 0x19c
+	portVLANMatrixStride     = 4
+	portVLANPortCount        = 8
+	offsetPortVLANMatrixLast = offsetPortVLANMatrixBase + ((portVLANPortCount - 1) * portVLANMatrixStride)
+	offsetPortVLANPortIDs    = 0x418
+	offsetPortVLANPortIDsEnd = offsetPortVLANPortIDs + portVLANPortCount - 1
+	offsetPortVLANModeA      = 0x3f4
+	offsetPortVLANModeB      = 0x3f5
 	offsetVLANName           = 0x4a6
 	maxVLANNameLen           = 32
+	offsetStormControlBase   = 0x5d
+	stormControlPortStride   = 0x10
+	stormControlSlotStride   = 0x04
+	stormControlPortCount    = 8
+	stormControlSlotCount    = 4
+	stormControlEnabledValue = 0x40
+	offsetStormControlLast   = offsetStormControlBase + ((stormControlPortCount - 1) * stormControlPortStride) + ((stormControlSlotCount - 1) * stormControlSlotStride)
+	offsetQoSPort1Priority   = 0x7e4
+	offsetQoSPort2Priority   = 0x7eb
+	offsetQoSPort3Priority   = 0x7f2
+	offsetQoSPort4Priority   = 0x7f9
+	offsetQoSPort5Priority   = 0x800
+	offsetQoSPort6Priority   = 0x807
+	offsetQoSPort7Priority   = 0x80e
+	offsetQoSPort8Priority   = 0x815
+	qosPortPriorityStride    = 7
+	qosPortCount             = 8
+	offsetLoopPreventionFlag = 0x831
+	offsetLoopPreventionMode = 0x83b
+	offsetIGMPFlag           = 0x83e
+	offsetIGMPReportSuppFlag = 0x83f
+	offsetQoSModeSigA        = 0x847
+	offsetQoSModeSigB        = 0x84b
+	offsetQoSModeSigC        = 0x853
+	offsetLEDFlag            = 0x8c8
 	minUsernameLen           = 1
 	maxUsernameLen           = 16
 	minPasswordLen           = 6
@@ -66,16 +100,47 @@ type BackupDiffReport struct {
 }
 
 type DecodedBackupConfig struct {
-	Size           int
-	Magic          uint32
-	IP             string
-	Netmask        string
-	Gateway        string
-	DHCPEnabled    bool
-	Hostname       string
-	VLANName       string
-	CredentialBlob []byte
-	CredentialInfo BackupCredentialReport
+	Size                         int
+	Magic                        uint32
+	IP                           string
+	Netmask                      string
+	Gateway                      string
+	DHCPEnabled                  bool
+	MirrorDestinationPresent     bool
+	MirrorDestinationKnown       bool
+	MirrorDestinationPort        int
+	QoSModePresent               bool
+	QoSModeKnown                 bool
+	QoSMode                      string
+	QoSModeSignature             [3]byte
+	QoSPortPrioritiesPresent     bool
+	QoSPortPrioritiesKnown       bool
+	QoSPortPriorities            [qosPortCount]int
+	QoSPort1PriorityPresent      bool
+	QoSPort1PriorityKnown        bool
+	QoSPort1Priority             int
+	PortVLANModePresent          bool
+	PortVLANModeKnown            bool
+	PortVLANModeEnabled          bool
+	PortVLANModeSignature        [2]byte
+	PortVLANMatrixPresent        bool
+	PortVLANMatrix               [portVLANPortCount]byte
+	PortVLANPortIDsPresent       bool
+	PortVLANPortIDs              [portVLANPortCount]byte
+	StormControlPresent          bool
+	StormControlRaw              [stormControlPortCount][stormControlSlotCount]byte
+	LoopPreventionPresent        bool
+	LoopPreventionEnabled        bool
+	IGMPSnoopingPresent          bool
+	IGMPSnoopingEnabled          bool
+	IGMPReportSuppressionPresent bool
+	IGMPReportSuppressionEnabled bool
+	LEDPresent                   bool
+	LEDEnabled                   bool
+	Hostname                     string
+	VLANName                     string
+	CredentialBlob               []byte
+	CredentialInfo               BackupCredentialReport
 }
 
 func DecodeBackupConfig(data []byte) (DecodedBackupConfig, error) {
@@ -90,17 +155,118 @@ func DecodeBackupConfig(data []byte) (DecodedBackupConfig, error) {
 	}
 
 	cred := bytes.Clone(data[offsetCredentialBlob : offsetCredentialBlob+credentialBlobLen])
+	mirrorDestinationPresent := len(data) > offsetMirrorDestination
+	mirrorDestinationKnown := false
+	mirrorDestinationPort := 0
+	qosPresent := len(data) > offsetQoSModeSigC
+	qosSignature := [3]byte{}
+	qosMode := ""
+	qosKnown := false
+	qosPort1PriorityPresent := len(data) > offsetQoSPort1Priority
+	qosPort1Priority := 0
+	qosPort1PriorityKnown := false
+	portVLANModePresent := len(data) > offsetPortVLANModeB
+	portVLANModeKnown := false
+	portVLANModeEnabled := false
+	portVLANModeSignature := [2]byte{}
+	portVLANMatrixPresent := len(data) > offsetPortVLANMatrixLast
+	portVLANMatrix := [portVLANPortCount]byte{}
+	portVLANPortIDsPresent := len(data) > offsetPortVLANPortIDsEnd
+	portVLANPortIDs := [portVLANPortCount]byte{}
+	qosPortPrioritiesPresent := len(data) > offsetQoSPort8Priority
+	qosPortPrioritiesKnown := false
+	qosPortPriorities := [qosPortCount]int{}
+	stormControlPresent := len(data) > offsetStormControlLast
+	stormControlRaw := [stormControlPortCount][stormControlSlotCount]byte{}
+	if qosPresent {
+		qosSignature = [3]byte{data[offsetQoSModeSigA], data[offsetQoSModeSigB], data[offsetQoSModeSigC]}
+		qosMode, qosKnown = decodeQoSModeSignature(qosSignature)
+	}
+	if mirrorDestinationPresent {
+		mirrorDestinationPort, mirrorDestinationKnown = decodeMirrorDestinationValue(data[offsetMirrorDestination])
+	}
+	if portVLANModePresent {
+		portVLANModeSignature = [2]byte{data[offsetPortVLANModeA], data[offsetPortVLANModeB]}
+		portVLANModeEnabled, portVLANModeKnown = decodePortVLANModeSignature(portVLANModeSignature)
+	}
+	if portVLANMatrixPresent {
+		for i := 0; i < portVLANPortCount; i++ {
+			portVLANMatrix[i] = data[offsetPortVLANMatrixBase+(i*portVLANMatrixStride)]
+		}
+	}
+	if portVLANPortIDsPresent {
+		for i := 0; i < portVLANPortCount; i++ {
+			portVLANPortIDs[i] = data[offsetPortVLANPortIDs+i]
+		}
+	}
+	if stormControlPresent {
+		for port := 0; port < stormControlPortCount; port++ {
+			for slot := 0; slot < stormControlSlotCount; slot++ {
+				offset := stormControlOffset(port, slot)
+				stormControlRaw[port][slot] = data[offset]
+			}
+		}
+	}
+	if qosPortPrioritiesPresent {
+		qosPortPrioritiesKnown = true
+		for i := 0; i < qosPortCount; i++ {
+			offset := offsetQoSPort1Priority + (i * qosPortPriorityStride)
+			priority, known := decodeQoSPortPriorityValue(data[offset])
+			qosPortPriorities[i] = priority
+			if !known {
+				qosPortPrioritiesKnown = false
+			}
+		}
+	}
+	if qosPort1PriorityPresent {
+		qosPort1Priority, qosPort1PriorityKnown = decodeQoSPortPriorityValue(data[offsetQoSPort1Priority])
+	}
+	loopPresent := len(data) > offsetLoopPreventionFlag
+	igmpPresent := len(data) > offsetIGMPFlag
+	igmpReportSuppPresent := len(data) > offsetIGMPReportSuppFlag
+	ledPresent := len(data) > offsetLEDFlag
 	decoded := DecodedBackupConfig{
-		Size:           len(data),
-		Magic:          magic,
-		IP:             ip4String(data[offsetIP : offsetIP+4]),
-		Netmask:        ip4String(data[offsetNetmask : offsetNetmask+4]),
-		Gateway:        ip4String(data[offsetGateway : offsetGateway+4]),
-		DHCPEnabled:    data[offsetDHCPFlag] != 0,
-		Hostname:       readCString(data, offsetHostname, maxHostnameLen),
-		VLANName:       readCString(data, offsetVLANName, maxVLANNameLen),
-		CredentialBlob: cred,
-		CredentialInfo: AnalyzeCredentialBlob(cred),
+		Size:                         len(data),
+		Magic:                        magic,
+		IP:                           ip4String(data[offsetIP : offsetIP+4]),
+		Netmask:                      ip4String(data[offsetNetmask : offsetNetmask+4]),
+		Gateway:                      ip4String(data[offsetGateway : offsetGateway+4]),
+		DHCPEnabled:                  data[offsetDHCPFlag] != 0,
+		MirrorDestinationPresent:     mirrorDestinationPresent,
+		MirrorDestinationKnown:       mirrorDestinationKnown,
+		MirrorDestinationPort:        mirrorDestinationPort,
+		QoSModePresent:               qosPresent,
+		QoSModeKnown:                 qosKnown,
+		QoSMode:                      qosMode,
+		QoSModeSignature:             qosSignature,
+		QoSPortPrioritiesPresent:     qosPortPrioritiesPresent,
+		QoSPortPrioritiesKnown:       qosPortPrioritiesKnown,
+		QoSPortPriorities:            qosPortPriorities,
+		QoSPort1PriorityPresent:      qosPort1PriorityPresent,
+		QoSPort1PriorityKnown:        qosPort1PriorityKnown,
+		QoSPort1Priority:             qosPort1Priority,
+		PortVLANModePresent:          portVLANModePresent,
+		PortVLANModeKnown:            portVLANModeKnown,
+		PortVLANModeEnabled:          portVLANModeEnabled,
+		PortVLANModeSignature:        portVLANModeSignature,
+		PortVLANMatrixPresent:        portVLANMatrixPresent,
+		PortVLANMatrix:               portVLANMatrix,
+		PortVLANPortIDsPresent:       portVLANPortIDsPresent,
+		PortVLANPortIDs:              portVLANPortIDs,
+		StormControlPresent:          stormControlPresent,
+		StormControlRaw:              stormControlRaw,
+		LoopPreventionPresent:        loopPresent,
+		LoopPreventionEnabled:        loopPresent && data[offsetLoopPreventionFlag] != 0,
+		IGMPSnoopingPresent:          igmpPresent,
+		IGMPSnoopingEnabled:          igmpPresent && data[offsetIGMPFlag] != 0,
+		IGMPReportSuppressionPresent: igmpReportSuppPresent,
+		IGMPReportSuppressionEnabled: igmpReportSuppPresent && data[offsetIGMPReportSuppFlag] != 0,
+		LEDPresent:                   ledPresent,
+		LEDEnabled:                   ledPresent && data[offsetLEDFlag] != 0,
+		Hostname:                     readCString(data, offsetHostname, maxHostnameLen),
+		VLANName:                     readCString(data, offsetVLANName, maxVLANNameLen),
+		CredentialBlob:               cred,
+		CredentialInfo:               AnalyzeCredentialBlob(cred),
 	}
 	decoded.CredentialInfo.ObfuscatedPasswordHex, decoded.CredentialInfo.RecoveredPassword, decoded.CredentialInfo.RecoveryMethod = recoverObfuscatedPassword(data)
 	return decoded, nil
@@ -168,6 +334,27 @@ func CompareBackupConfigs(base []byte, candidate []byte) (BackupDiffReport, erro
 	appendFieldChange(&report.FieldChanges, "Netmask", baseDecoded.Netmask, candidateDecoded.Netmask)
 	appendFieldChange(&report.FieldChanges, "Gateway", baseDecoded.Gateway, candidateDecoded.Gateway)
 	appendFieldChange(&report.FieldChanges, "DHCP", ternary(baseDecoded.DHCPEnabled, "enabled", "disabled"), ternary(candidateDecoded.DHCPEnabled, "enabled", "disabled"))
+	appendFieldChange(&report.FieldChanges, "Mirror destination", mirrorDestinationState(baseDecoded), mirrorDestinationState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "Port VLAN mode", portVLANModeState(baseDecoded), portVLANModeState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "Port VLAN members", portVLANMembersState(baseDecoded), portVLANMembersState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "Port VLAN IDs", portVLANIDsState(baseDecoded), portVLANIDsState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "QoS mode", qosModeState(baseDecoded), qosModeState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "QoS priorities", qosPrioritiesState(baseDecoded), qosPrioritiesState(candidateDecoded))
+	appendFieldChange(&report.FieldChanges, "QoS gi1 priority", qosPortPriorityState(baseDecoded.QoSPort1PriorityPresent, baseDecoded.QoSPort1PriorityKnown, baseDecoded.QoSPort1Priority), qosPortPriorityState(candidateDecoded.QoSPort1PriorityPresent, candidateDecoded.QoSPort1PriorityKnown, candidateDecoded.QoSPort1Priority))
+	for port := 0; port < stormControlPortCount; port++ {
+		for slot := 0; slot < stormControlSlotCount; slot++ {
+			appendFieldChange(
+				&report.FieldChanges,
+				stormControlFieldLabel(port, slot),
+				stormControlSlotState(baseDecoded.StormControlPresent, baseDecoded.StormControlRaw[port][slot]),
+				stormControlSlotState(candidateDecoded.StormControlPresent, candidateDecoded.StormControlRaw[port][slot]),
+			)
+		}
+	}
+	appendFieldChange(&report.FieldChanges, "Spanning tree", optionalState(baseDecoded.LoopPreventionPresent, baseDecoded.LoopPreventionEnabled, "enabled", "disabled"), optionalState(candidateDecoded.LoopPreventionPresent, candidateDecoded.LoopPreventionEnabled, "enabled", "disabled"))
+	appendFieldChange(&report.FieldChanges, "IGMP", optionalState(baseDecoded.IGMPSnoopingPresent, baseDecoded.IGMPSnoopingEnabled, "enabled", "disabled"), optionalState(candidateDecoded.IGMPSnoopingPresent, candidateDecoded.IGMPSnoopingEnabled, "enabled", "disabled"))
+	appendFieldChange(&report.FieldChanges, "IGMP report-suppression", optionalState(baseDecoded.IGMPReportSuppressionPresent, baseDecoded.IGMPReportSuppressionEnabled, "enabled", "disabled"), optionalState(candidateDecoded.IGMPReportSuppressionPresent, candidateDecoded.IGMPReportSuppressionEnabled, "enabled", "disabled"))
+	appendFieldChange(&report.FieldChanges, "LED", optionalState(baseDecoded.LEDPresent, baseDecoded.LEDEnabled, "on", "off"), optionalState(candidateDecoded.LEDPresent, candidateDecoded.LEDEnabled, "on", "off"))
 	appendFieldChange(&report.FieldChanges, "VLAN name", baseDecoded.VLANName, candidateDecoded.VLANName)
 	if baseDecoded.CredentialInfo.RecoveredPassword != "" && candidateDecoded.CredentialInfo.RecoveredPassword != "" {
 		appendFieldChange(&report.FieldChanges, "Password (obfuscated@0x49)", baseDecoded.CredentialInfo.RecoveredPassword, candidateDecoded.CredentialInfo.RecoveredPassword)
@@ -260,6 +447,18 @@ func FormatDecodedBackup(decoded DecodedBackupConfig) string {
 	fmt.Fprintf(&b, "  Netmask    : %s\n", decoded.Netmask)
 	fmt.Fprintf(&b, "  Gateway    : %s\n", decoded.Gateway)
 	fmt.Fprintf(&b, "  DHCP       : %s\n", ternary(decoded.DHCPEnabled, "enabled", "disabled"))
+	fmt.Fprintf(&b, "  Mirror dst : %s\n", mirrorDestinationState(decoded))
+	fmt.Fprintf(&b, "  Port VLAN  : %s\n", portVLANModeState(decoded))
+	fmt.Fprintf(&b, "  Port VLAN M: %s\n", portVLANMembersState(decoded))
+	fmt.Fprintf(&b, "  Port VLAN I: %s\n", portVLANIDsState(decoded))
+	fmt.Fprintf(&b, "  QoS mode   : %s\n", qosModeState(decoded))
+	fmt.Fprintf(&b, "  QoS pri map: %s\n", qosPrioritiesState(decoded))
+	fmt.Fprintf(&b, "  QoS gi1 pri: %s\n", qosPortPriorityState(decoded.QoSPort1PriorityPresent, decoded.QoSPort1PriorityKnown, decoded.QoSPort1Priority))
+	fmt.Fprintf(&b, "  Storm ctl  : %s\n", stormControlSummary(decoded))
+	fmt.Fprintf(&b, "  STP        : %s\n", optionalState(decoded.LoopPreventionPresent, decoded.LoopPreventionEnabled, "enabled", "disabled"))
+	fmt.Fprintf(&b, "  IGMP       : %s\n", optionalState(decoded.IGMPSnoopingPresent, decoded.IGMPSnoopingEnabled, "enabled", "disabled"))
+	fmt.Fprintf(&b, "  IGMP RS    : %s\n", optionalState(decoded.IGMPReportSuppressionPresent, decoded.IGMPReportSuppressionEnabled, "enabled", "disabled"))
+	fmt.Fprintf(&b, "  LED        : %s\n", optionalState(decoded.LEDPresent, decoded.LEDEnabled, "on", "off"))
 	fmt.Fprintf(&b, "  VLAN name  : %s\n", fallback(decoded.VLANName, "(empty)"))
 	fmt.Fprintf(&b, "\nCredential Block (offset 0x2c, 32 bytes)\n")
 	fmt.Fprintf(&b, "  Policy     : username %d-%d [A-Za-z0-9_], password %d-%d [A-Za-z0-9_]\n", minUsernameLen, maxUsernameLen, minPasswordLen, maxPasswordLen)
@@ -312,6 +511,222 @@ func appendFieldChange(changes *[]string, field string, before string, after str
 		return
 	}
 	*changes = append(*changes, fmt.Sprintf("%s: %q -> %q", field, before, after))
+}
+
+func decodeQoSModeSignature(signature [3]byte) (string, bool) {
+	switch signature {
+	case [3]byte{0x04, 0x05, 0x06}:
+		return "dscp", true
+	case [3]byte{0x05, 0x06, 0x00}:
+		return "dot1p", true
+	case [3]byte{0x06, 0x00, 0x00}:
+		return "port-based", true
+	default:
+		return "", false
+	}
+}
+
+func decodeQoSPortPriorityValue(raw byte) (int, bool) {
+	switch raw {
+	case 0x00:
+		return 1, true
+	case 0x02:
+		return 2, true
+	case 0x04:
+		return 3, true
+	case 0x06:
+		return 4, true
+	default:
+		return 0, false
+	}
+}
+
+func decodeMirrorDestinationValue(raw byte) (int, bool) {
+	if raw == 0x00 {
+		return 0, true
+	}
+	if raw >= 1 && raw <= portVLANPortCount {
+		return int(raw), true
+	}
+	return 0, false
+}
+
+func mirrorDestinationState(decoded DecodedBackupConfig) string {
+	if !decoded.MirrorDestinationPresent {
+		return "unknown"
+	}
+	if !decoded.MirrorDestinationKnown {
+		return fmt.Sprintf("unknown(raw@0x%02x)", offsetMirrorDestination)
+	}
+	if decoded.MirrorDestinationPort == 0 {
+		return "disabled"
+	}
+	return fmt.Sprintf("gi%d", decoded.MirrorDestinationPort)
+}
+
+func decodePortVLANModeSignature(signature [2]byte) (bool, bool) {
+	switch signature {
+	case [2]byte{0x00, 0x01}:
+		return true, true
+	case [2]byte{0x01, 0x02}:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func portVLANModeState(decoded DecodedBackupConfig) string {
+	if !decoded.PortVLANModePresent {
+		return "unknown"
+	}
+	if decoded.PortVLANModeKnown {
+		if decoded.PortVLANModeEnabled {
+			return "enabled"
+		}
+		return "disabled"
+	}
+	sig := decoded.PortVLANModeSignature
+	return fmt.Sprintf("unknown(sig=%02x/%02x)", sig[0], sig[1])
+}
+
+func portVLANMembersState(decoded DecodedBackupConfig) string {
+	if !decoded.PortVLANMatrixPresent {
+		return "unknown"
+	}
+	return portsMaskString(decoded.PortVLANMatrix[0])
+}
+
+func portVLANIDsState(decoded DecodedBackupConfig) string {
+	if !decoded.PortVLANPortIDsPresent {
+		return "unknown"
+	}
+	parts := make([]string, 0, portVLANPortCount)
+	for i := 0; i < portVLANPortCount; i++ {
+		parts = append(parts, fmt.Sprintf("gi%d=%d", i+1, decoded.PortVLANPortIDs[i]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func portsMaskString(mask byte) string {
+	ports := make([]string, 0, portVLANPortCount)
+	for i := 0; i < portVLANPortCount; i++ {
+		if (mask & (1 << i)) == 0 {
+			continue
+		}
+		ports = append(ports, fmt.Sprintf("gi%d", i+1))
+	}
+	if len(ports) == 0 {
+		return "(none)"
+	}
+	return strings.Join(ports, ",")
+}
+
+func qosModeState(decoded DecodedBackupConfig) string {
+	if !decoded.QoSModePresent {
+		return "unknown"
+	}
+	if decoded.QoSModeKnown {
+		return decoded.QoSMode
+	}
+	sig := decoded.QoSModeSignature
+	return fmt.Sprintf("unknown(sig=%02x/%02x/%02x)", sig[0], sig[1], sig[2])
+}
+
+func qosPortPriorityState(present bool, known bool, priority int) string {
+	if !present {
+		return "unknown"
+	}
+	if !known {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", priority)
+}
+
+func qosPrioritiesState(decoded DecodedBackupConfig) string {
+	if !decoded.QoSPortPrioritiesPresent {
+		return "unknown"
+	}
+	if !decoded.QoSPortPrioritiesKnown {
+		return "unknown"
+	}
+	parts := make([]string, 0, qosPortCount)
+	for i := 0; i < qosPortCount; i++ {
+		parts = append(parts, fmt.Sprintf("gi%d=%d", i+1, decoded.QoSPortPriorities[i]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func stormControlFieldLabel(port int, slot int) string {
+	return fmt.Sprintf("Storm gi%d %s", port+1, stormControlSlotLabel(slot))
+}
+
+func stormControlSlotLabel(slot int) string {
+	switch slot {
+	case 0:
+		return "broadcast"
+	case 1:
+		return "multicast"
+	case 2:
+		return "unknown-unicast"
+	default:
+		return "all"
+	}
+}
+
+func stormControlOffset(port int, slot int) int {
+	return offsetStormControlBase + (port * stormControlPortStride) + (slot * stormControlSlotStride)
+}
+
+func stormControlSlotState(present bool, raw byte) string {
+	if !present {
+		return "unknown"
+	}
+	switch raw {
+	case 0x00:
+		return "off"
+	case stormControlEnabledValue:
+		return "on"
+	default:
+		return fmt.Sprintf("unknown(0x%02x)", raw)
+	}
+}
+
+func stormControlSummary(decoded DecodedBackupConfig) string {
+	if !decoded.StormControlPresent {
+		return "unknown"
+	}
+	enabled := make([]string, 0)
+	unknown := make([]string, 0)
+	for port := 0; port < stormControlPortCount; port++ {
+		for slot := 0; slot < stormControlSlotCount; slot++ {
+			raw := decoded.StormControlRaw[port][slot]
+			if raw == stormControlEnabledValue {
+				enabled = append(enabled, fmt.Sprintf("gi%d:%s", port+1, stormControlSlotLabel(slot)))
+				continue
+			}
+			if raw != 0x00 {
+				unknown = append(unknown, fmt.Sprintf("gi%d:%s=0x%02x", port+1, stormControlSlotLabel(slot), raw))
+			}
+		}
+	}
+	state := "all-off"
+	if len(enabled) > 0 {
+		state = strings.Join(enabled, ",")
+	}
+	if len(unknown) == 0 {
+		return state
+	}
+	return state + ";unknown=" + strings.Join(unknown, ",")
+}
+
+func optionalState(present bool, enabled bool, whenEnabled string, whenDisabled string) string {
+	if !present {
+		return "unknown"
+	}
+	if enabled {
+		return whenEnabled
+	}
+	return whenDisabled
 }
 
 func credentialDiffBytes(base []byte, candidate []byte) int {

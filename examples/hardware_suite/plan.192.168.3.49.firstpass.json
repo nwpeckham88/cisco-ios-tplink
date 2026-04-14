@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "target": {
+    "host": "192.168.3.49",
+    "username": "admin",
+    "initial_password_env": "TPLINK_PASSWORD",
+    "post_reset_password": "testpass"
+  },
+  "safety": {
+    "enabled": true,
+    "confirm": "I_UNDERSTAND_THIS_WILL_FACTORY_RESET_MY_SWITCH"
+  },
+  "timing": {
+    "reset_grace": "5s",
+    "reconnect_timeout": "180s",
+    "poll_interval": "2s",
+    "post_mutation_settle": "2s"
+  },
+  "artifacts": {
+    "output_dir": "artifacts/hardware-suite",
+    "decode_summary": true
+  },
+  "mutations": [
+    {
+      "id": "hostname-re-a1",
+      "kind": "script-inline",
+      "script_lines": [
+        "configure terminal",
+        "hostname re-a1",
+        "end",
+        "copy running-config startup-config"
+      ]
+    },
+    {
+      "id": "vlan1-name-revlana",
+      "kind": "script-inline",
+      "script_lines": [
+        "configure terminal",
+        "vlan 1",
+        "name REVLANA",
+        "exit",
+        "end",
+        "copy running-config startup-config"
+      ]
+    },
+    {
+      "id": "password-testpass-to-passtest",
+      "kind": "change-password",
+      "old_password": "testpass",
+      "new_password": "passtest"
+    }
+  ]
+}

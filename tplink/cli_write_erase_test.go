@@ -29,6 +29,9 @@ func newWriteEraseCLI(t *testing.T) (*CLI, *atomic.Int32) {
 			fmt.Fprint(w, `<script>var qvlan_ds = {state:1, count:2, vids:[1,10], names:['VLAN1','Users'], tagMbrs:[0,3], untagMbrs:[255,28]};</script>`)
 		case "/Vlan8021QPvidRpm.htm":
 			fmt.Fprint(w, `<script>var pvid_ds = {pvids:[1,1,10,10,10,1,1,1]};</script>`)
+		case "/config_back.cgi":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buildSyntheticBackup())
 		case "/reset.cgi":
 			resetCalls.Add(1)
 			fmt.Fprint(w, "ok")
@@ -207,6 +210,43 @@ func TestCopyRunningStartupAlias(t *testing.T) {
 	}
 	if !strings.Contains(out, "Building configuration") || !strings.Contains(out, "[OK]") {
 		t.Fatalf("missing IOS-style save output: %q", out)
+	}
+}
+
+func TestCopyRunningConfigToFile(t *testing.T) {
+	c, resetCalls := newWriteEraseCLI(t)
+
+	dest := filepath.Join(t.TempDir(), "live-backup.bin")
+	out := captureStdout(t, func() {
+		quit, err := c.cmdCopy("running-config " + dest)
+		if err != nil {
+			t.Fatalf("cmdCopy(running-config <file>): %v", err)
+		}
+		if quit {
+			t.Fatal("expected backup download to keep session open")
+		}
+	})
+
+	if resetCalls.Load() != 0 {
+		t.Fatalf("copy running-config <file> should not trigger reset, calls=%d", resetCalls.Load())
+	}
+	if !strings.Contains(out, "Config saved to") {
+		t.Fatalf("missing save confirmation output: %q", out)
+	}
+
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", dest, err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty backup file")
+	}
+	decoded, err := DecodeBackupConfig(data)
+	if err != nil {
+		t.Fatalf("DecodeBackupConfig(downloaded): %v", err)
+	}
+	if decoded.Magic != backupMagic {
+		t.Fatalf("unexpected backup magic: %#x", decoded.Magic)
 	}
 }
 

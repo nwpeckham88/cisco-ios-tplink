@@ -124,12 +124,47 @@ type hardwareSuiteSnapshot struct {
 }
 
 type hardwareSuiteDecodedBrief struct {
-	Hostname string `json:"hostname"`
-	IP       string `json:"ip"`
-	Netmask  string `json:"netmask"`
-	Gateway  string `json:"gateway"`
-	DHCP     bool   `json:"dhcp"`
-	VLANName string `json:"vlan_name"`
+	Hostname                   string `json:"hostname"`
+	IP                         string `json:"ip"`
+	Netmask                    string `json:"netmask"`
+	Gateway                    string `json:"gateway"`
+	DHCP                       bool   `json:"dhcp"`
+	QoSMode                    string `json:"qos_mode"`
+	QoSModeKnown               bool   `json:"qos_mode_known"`
+	QoSGi1Priority             int    `json:"qos_gi1_priority"`
+	QoSGi1PriorityKnown        bool   `json:"qos_gi1_priority_known"`
+	STP                        bool   `json:"stp"`
+	STPKnown                   bool   `json:"stp_known"`
+	IGMP                       bool   `json:"igmp"`
+	IGMPKnown                  bool   `json:"igmp_known"`
+	IGMPReportSuppression      bool   `json:"igmp_report_suppression"`
+	IGMPReportSuppressionKnown bool   `json:"igmp_report_suppression_known"`
+	LED                        bool   `json:"led"`
+	LEDKnown                   bool   `json:"led_known"`
+	VLANName                   string `json:"vlan_name"`
+}
+
+func decodeSummaryBrief(decoded tplink.DecodedBackupConfig) hardwareSuiteDecodedBrief {
+	return hardwareSuiteDecodedBrief{
+		Hostname:                   decoded.Hostname,
+		IP:                         decoded.IP,
+		Netmask:                    decoded.Netmask,
+		Gateway:                    decoded.Gateway,
+		DHCP:                       decoded.DHCPEnabled,
+		QoSMode:                    decoded.QoSMode,
+		QoSModeKnown:               decoded.QoSModeKnown,
+		QoSGi1Priority:             decoded.QoSPort1Priority,
+		QoSGi1PriorityKnown:        decoded.QoSPort1PriorityKnown,
+		STP:                        decoded.LoopPreventionEnabled,
+		STPKnown:                   decoded.LoopPreventionPresent,
+		IGMP:                       decoded.IGMPSnoopingEnabled,
+		IGMPKnown:                  decoded.IGMPSnoopingPresent,
+		IGMPReportSuppression:      decoded.IGMPReportSuppressionEnabled,
+		IGMPReportSuppressionKnown: decoded.IGMPReportSuppressionPresent,
+		LED:                        decoded.LEDEnabled,
+		LEDKnown:                   decoded.LEDPresent,
+		VLANName:                   decoded.VLANName,
+	}
 }
 
 type hardwareSuiteOps interface {
@@ -598,14 +633,8 @@ func (o *hardwareSuiteRealOps) CaptureBackup(ctx context.Context, label string, 
 		if decodeErr != nil {
 			snapshot.DecodeErr = decodeErr.Error()
 		} else {
-			snapshot.Decoded = &hardwareSuiteDecodedBrief{
-				Hostname: decoded.Hostname,
-				IP:       decoded.IP,
-				Netmask:  decoded.Netmask,
-				Gateway:  decoded.Gateway,
-				DHCP:     decoded.DHCPEnabled,
-				VLANName: decoded.VLANName,
-			}
+			brief := decodeSummaryBrief(decoded)
+			snapshot.Decoded = &brief
 		}
 	}
 
