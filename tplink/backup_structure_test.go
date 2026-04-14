@@ -86,7 +86,7 @@ func TestKnownBackupStructureRangesIncludeControlFlags(t *testing.T) {
 	}
 
 	want := map[int]string{
-		offsetMirrorDestination:                             "mirror destination port",
+		offsetMirrorDestination:                               "mirror destination port",
 		offsetPortVLANMatrixBase + (0 * portVLANMatrixStride): "port-vlan matrix gi1",
 		offsetPortVLANMatrixBase + (7 * portVLANMatrixStride): "port-vlan matrix gi8",
 		offsetPortVLANPortIDs + 0:                             "port-vlan id gi1",
